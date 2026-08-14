@@ -29,13 +29,21 @@ const CHAVES_PAINEL_CUSTOM = new Set([
   "evolucao_backlog",
 ]);
 
-// Candidatas ao toggle "Visível no Painel Operador" nesta fatia — só
-// métricas "agora", sem gráfico (o Operador ainda não tem motor de
-// gráfico SVG em app.js; porta dos painéis com gráfico fica pra uma
-// fatia futura, ver plano da sessão). `pendencias_sem_contato` fica de
-// fora de propósito — já é essencialmente coberta pela "Fila de
-// prioridade" nativa do Operador.
-const CANDIDATAS_OPERADOR = new Set(["pendencias_em_aberto", "encaminhadas_puma", "pendentes_por_cidade"]);
+// Candidatas ao toggle "Visível no Painel Operador" — o Operador já tem
+// motor de gráfico (Fase 5, `ui/web/charts.js` + `orchestrator.
+// metricas_admin_operador`) para as 5 chaves de gráfico abaixo, além das
+// 3 originais. `pendencias_sem_contato` fica de fora de propósito — já é
+// essencialmente coberta pela "Fila de prioridade" nativa do Operador.
+const CANDIDATAS_OPERADOR = new Set([
+  "pendencias_em_aberto", "encaminhadas_puma", "pendentes_por_cidade",
+  "tendencia_diaria", "estado_por_origem", "distribuicao_urgencia",
+  "evolucao_backlog", "pendentes_por_tipo",
+  // Métricas "de período" (2026-08-14) — Painel Operador ganhou filtro
+  // De/Até próprio pra elas (ver orchestrator/metricas_admin_operador.py).
+  "disparos", "retornados", "agendamentos_confirmados", "concluidos",
+  "pct_resposta", "tempo_medio_resolucao", "taxa_escalonamento_puma",
+  "pendentes", "em_andamento", "pct_pendencias", "pct_pendencias_concluidas",
+]);
 
 type EstadoForm = { erro?: string };
 const ESTADO_INICIAL: EstadoForm = {};
@@ -84,7 +92,13 @@ export default function DashboardsClient({
         <TendenciaDiaria
           serie={serieDiaria}
           rodape={
-            <TogglePainelCliente chave="tendencia_diaria" visivelInicial={visibilidade["tendencia_diaria"] ?? false} />
+            <>
+              <TogglePainelCliente chave="tendencia_diaria" visivelInicial={visibilidade["tendencia_diaria"] ?? false} />
+              <TogglePainelOperador
+                chave="tendencia_diaria"
+                visivelInicial={visibilidadeOperador["tendencia_diaria"] ?? false}
+              />
+            </>
           }
         />
       </div>
@@ -94,7 +108,13 @@ export default function DashboardsClient({
         key="estado_por_origem"
         metricas={metricas}
         rodape={
-          <TogglePainelCliente chave="estado_por_origem" visivelInicial={visibilidade["estado_por_origem"] ?? false} />
+          <>
+            <TogglePainelCliente chave="estado_por_origem" visivelInicial={visibilidade["estado_por_origem"] ?? false} />
+            <TogglePainelOperador
+              chave="estado_por_origem"
+              visivelInicial={visibilidadeOperador["estado_por_origem"] ?? false}
+            />
+          </>
         }
       />
     ),
@@ -134,6 +154,10 @@ export default function DashboardsClient({
         })}
 
         <TogglePainelCliente chave="pendentes_por_tipo" visivelInicial={visibilidade["pendentes_por_tipo"] ?? false} />
+        <TogglePainelOperador
+          chave="pendentes_por_tipo"
+          visivelInicial={visibilidadeOperador["pendentes_por_tipo"] ?? false}
+        />
       </div>
     ),
     distribuicao_urgencia: (
@@ -141,7 +165,13 @@ export default function DashboardsClient({
         key="distribuicao_urgencia"
         distribuicao={distribuicaoUrgencia}
         rodape={
-          <TogglePainelCliente chave="distribuicao_urgencia" visivelInicial={visibilidade["distribuicao_urgencia"] ?? false} />
+          <>
+            <TogglePainelCliente chave="distribuicao_urgencia" visivelInicial={visibilidade["distribuicao_urgencia"] ?? false} />
+            <TogglePainelOperador
+              chave="distribuicao_urgencia"
+              visivelInicial={visibilidadeOperador["distribuicao_urgencia"] ?? false}
+            />
+          </>
         }
       />
     ),
@@ -152,7 +182,13 @@ export default function DashboardsClient({
           desde={desde}
           ate={ate}
           rodape={
-            <TogglePainelCliente chave="evolucao_backlog" visivelInicial={visibilidade["evolucao_backlog"] ?? false} />
+            <>
+              <TogglePainelCliente chave="evolucao_backlog" visivelInicial={visibilidade["evolucao_backlog"] ?? false} />
+              <TogglePainelOperador
+                chave="evolucao_backlog"
+                visivelInicial={visibilidadeOperador["evolucao_backlog"] ?? false}
+              />
+            </>
           }
         />
       </div>

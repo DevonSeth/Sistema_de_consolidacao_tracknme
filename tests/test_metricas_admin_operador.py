@@ -19,6 +19,12 @@ class _Query:
     def eq(self, *a, **k):
         return self
 
+    def gte(self, *a, **k):
+        return self
+
+    def lte(self, *a, **k):
+        return self
+
     def neq(self, *a, **k):
         return self
 
@@ -291,3 +297,166 @@ def test_montar_metricas_admin_operador_nenhuma_visivel(monkeypatch):
     assert mao.montar_metricas_admin_operador() == {
         "metricas_simples": {}, "metricas_lista": {}, "metricas_grafico": {},
     }
+
+
+# --------------------------------------------------------------------------
+# Métricas "de período" (filtro De/Até no Painel Operador, 2026-08-14)
+# --------------------------------------------------------------------------
+
+DESDE_ISO = "2026-07-01T00:00:00.000Z"
+ATE_ISO = "2026-08-14T23:59:59.999Z"
+
+
+def test_disparos_no_periodo_soma_as_3_tentativas(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={"tratativas": [[{"id": "a"}, {"id": "b"}], [{"id": "c"}], []]}
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._disparos_no_periodo(DESDE_ISO, ATE_ISO) == 3
+
+
+def test_retornados_no_periodo_soma_resposta_e_ligacao(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={
+            "tratativas": [[{"id": "a"}]],
+            "ligacoes": [[{"id": "x"}, {"id": "y"}]],
+        }
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._retornados_no_periodo(DESDE_ISO, ATE_ISO) == 3
+
+
+def test_agendamentos_confirmados_no_periodo(monkeypatch):
+    cliente = _ClienteFalso(retornos={"ligacoes": [[{"id": "x"}, {"id": "y"}, {"id": "z"}]]})
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._agendamentos_confirmados_no_periodo(DESDE_ISO, ATE_ISO) == 3
+
+
+def test_concluidos_no_periodo_soma_tratativas_e_puma(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={
+            "tratativas": [[{"id": "a"}]],
+            "puma_encaminhamentos": [[{"id": "x"}, {"id": "y"}]],
+        }
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._concluidos_no_periodo(DESDE_ISO, ATE_ISO) == 3
+
+
+def test_pct_resposta_no_periodo_calcula_razao(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={
+            "tratativas": [[{"id": "a"}], [{"id": "b"}], [], [{"id": "c"}]],
+            "ligacoes": [[{"id": "x"}]],
+        }
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    # disparos = 1+1+0 = 2; retornados = 1 (tratativas) + 1 (ligacoes) = 2
+    assert mao._pct_resposta_no_periodo(DESDE_ISO, ATE_ISO) == "100.0%"
+
+
+def test_pct_resposta_no_periodo_sem_disparos_nao_divide_por_zero(monkeypatch):
+    cliente = _ClienteFalso(retornos={"tratativas": [[], [], [], []], "ligacoes": [[]]})
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._pct_resposta_no_periodo(DESDE_ISO, ATE_ISO) == "0.0%"
+
+
+def test_tempo_medio_resolucao_no_periodo_media_dias(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={
+            "tratativas": [
+                [{"created_at": "2026-08-01T00:00:00", "finalizado_em": "2026-08-03T00:00:00"}],  # direta: 2 dias
+                [{"id": "t1", "created_at": "2026-08-01T00:00:00"}],  # lookup do via_puma
+            ],
+            "puma_encaminhamentos": [
+                [{"tratativa_id": "t1", "concluido_em": "2026-08-05T00:00:00"}],  # via puma: 4 dias
+            ],
+        }
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._tempo_medio_resolucao_no_periodo(DESDE_ISO, ATE_ISO) == "3.0 dias"
+
+
+def test_tempo_medio_resolucao_no_periodo_sem_nenhuma_conclusao(monkeypatch):
+    cliente = _ClienteFalso(retornos={"tratativas": [[]], "puma_encaminhamentos": [[]]})
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._tempo_medio_resolucao_no_periodo(DESDE_ISO, ATE_ISO) == "—"
+
+
+def test_taxa_escalonamento_puma_no_periodo(monkeypatch):
+    cliente = _ClienteFalso(retornos={"ligacoes": [[{"id": "a"}, {"id": "b"}], [{"id": "a"}]]})
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._taxa_escalonamento_puma_no_periodo(DESDE_ISO, ATE_ISO) == "50.0%"
+
+
+def test_taxa_escalonamento_puma_no_periodo_sem_ligacoes(monkeypatch):
+    cliente = _ClienteFalso(retornos={"ligacoes": [[]]})
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._taxa_escalonamento_puma_no_periodo(DESDE_ISO, ATE_ISO) == "—"
+
+
+def test_estado_fim_periodo_agrega_todas_as_origens(monkeypatch):
+    cliente = _ClienteFalso(
+        rpc_retorno=[
+            {"origem": "instalacao", "bucket": "pendente", "quantidade": 3},
+            {"origem": "manutencao", "bucket": "pendente", "quantidade": 1},
+            {"origem": "instalacao", "bucket": "em_andamento", "quantidade": 2},
+            {"origem": "remocao", "bucket": "concluido", "quantidade": 5},
+        ]
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    assert mao._estado_fim_periodo(ATE_ISO) == {"pendente": 4, "em_andamento": 2, "concluido": 5}
+    assert cliente.chamadas_rpc[0] == ("dashboard_estado_em", {"p_data": ATE_ISO})
+
+
+def test_montar_metricas_admin_operador_inclui_metricas_de_periodo(monkeypatch):
+    cliente = _ClienteFalso(
+        retornos={
+            "dashboard_metricas_cliente": [[
+                {"chave": "disparos", "visivel_operador": True},
+                {"chave": "pendentes", "visivel_operador": True},
+                {"chave": "em_andamento", "visivel_operador": True},
+            ]],
+            "tratativas": [[{"id": "a"}], [], []],
+        },
+        rpc_retorno=[{"origem": "instalacao", "bucket": "pendente", "quantidade": 2}],
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+
+    resultado = mao.montar_metricas_admin_operador()
+
+    assert resultado["metricas_simples"] == {"disparos": 1, "pendentes": 2, "em_andamento": 0}
+    # pendentes + em_andamento visíveis juntos -> só 1 chamada ao RPC (evita recomputar _estado_fim_periodo 2x)
+    assert len(cliente.chamadas_rpc) == 1
+
+
+def test_montar_metricas_admin_operador_usa_janela_de_30_dias_por_padrao(monkeypatch):
+    capturado = {}
+
+    def _disparos_fake(desde_iso, ate_iso):
+        capturado["desde"] = desde_iso
+        capturado["ate"] = ate_iso
+        return 0
+
+    cliente = _ClienteFalso(
+        retornos={"dashboard_metricas_cliente": [[{"chave": "disparos", "visivel_operador": True}]]}
+    )
+    monkeypatch.setattr(mao, "get_client", lambda: cliente)
+    monkeypatch.setitem(mao._CALCULO_PERIODO_POR_CHAVE, "disparos", _disparos_fake)
+
+    mao.montar_metricas_admin_operador()
+
+    desde = datetime.fromisoformat(capturado["desde"].replace("Z", "+00:00"))
+    ate = datetime.fromisoformat(capturado["ate"].replace("Z", "+00:00"))
+    assert (ate.date() - desde.date()).days == 29

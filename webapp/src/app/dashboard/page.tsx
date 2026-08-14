@@ -15,6 +15,7 @@ import { METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
 
 import BotaoImprimir from "./BotaoImprimir";
+import CabecalhoImpressao from "./CabecalhoImpressao";
 import DistribuicaoUrgencia from "./DistribuicaoUrgencia";
 import EstadoPorOrigem from "./EstadoPorOrigem";
 import EvolucaoBacklog from "./EvolucaoBacklog";
@@ -101,6 +102,7 @@ export default async function DashboardPage({
 
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem", maxWidth: 1100, margin: "0 auto" }}>
+      <CabecalhoImpressao />
       <div className="page-header dashboard-header">
         <img src="/logo-viver-de-rastreamento.png" alt="Viver de Rastreamento" className="dashboard-logo" />
         <div>

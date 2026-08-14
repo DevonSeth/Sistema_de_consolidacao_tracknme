@@ -21,6 +21,14 @@ Candidatas implementadas:
     evolucao_backlog      -> gráfico (série diária acumulada desde o início)
     pendentes_por_tipo    -> gráfico (reaproveita estado_por_origem)
 
+Métricas "de período" (2026-08-14 — únicas com filtro De/Até de verdade
+no Painel Operador, ver `montar_metricas_admin_operador`/`ui/web`):
+    disparos, retornados, agendamentos_confirmados, concluidos,
+    pct_resposta, tempo_medio_resolucao, taxa_escalonamento_puma,
+    pendentes, em_andamento, pct_pendencias, pct_pendencias_concluidas
+    -> todas números simples (percentuais/tempo médio já formatados como
+       string pronta pra tela, ex: "19.4%"/"29.3 dias"/"—")
+
 As 5 últimas (`_METRICAS_GRAFICO`) são "de período" na origem (TS), mas o
 Operador não tem seletor de data — decisão fechada com o usuário
 (2026-08-13): `tendencia_diaria` usa uma janela FIXA de 30 dias
@@ -266,6 +274,150 @@ def _pendentes_por_tipo_agora() -> dict:
     return {origem: dados["pendente"] for origem, dados in _estado_por_origem_agora().items()}
 
 
+# --- Métricas "de período" (filtro De/Até no Painel Operador, 2026-08-14) --
+#
+# As 11 abaixo (`_CALCULO_PERIODO_POR_CHAVE` + `_CHAVES_ESTADO_FIM_PERIODO`)
+# são "porta fiel" das equivalentes em `webapp/src/lib/dashboard-metrics.ts`
+# — únicas que dependem de um intervalo De/Até, por isso o Painel Operador
+# ganhou um filtro de período de verdade só pra elas (as demais acima
+# continuam "agora"/janela fixa, sem filtro).
+
+def _janela_padrao_30_dias() -> tuple[str, str]:
+    """Default quando o Painel Operador ainda não aplicou nenhum filtro —
+    mesma janela de `dataDefaultDesde()`/`hojeISO()` (TS)."""
+    hoje = datetime.now(timezone.utc).date()
+    desde = hoje - timedelta(days=29)
+    return f"{desde.isoformat()}T00:00:00.000Z", f"{hoje.isoformat()}T23:59:59.999Z"
+
+
+def _contar_no_intervalo(tabela: str, coluna: str, desde_iso: str, ate_iso: str,
+                         filtros_extra: dict | None = None) -> int:
+    """Mesmo padrão `count/gte/lte` de `dashboard-metrics.ts`, mas conta em
+    Python (busca só `id`) em vez de usar `count="exact"` do PostgREST —
+    mesmo espírito de `_encaminhadas_para_puma_agora`."""
+    client = get_client()
+    query = client.table(tabela).select("id").gte(coluna, desde_iso).lte(coluna, ate_iso)
+    for campo, valor in (filtros_extra or {}).items():
+        query = query.eq(campo, valor)
+    return len(query.execute().data or [])
+
+
+def _disparos_no_periodo(desde_iso: str, ate_iso: str) -> int:
+    return sum(
+        _contar_no_intervalo("tratativas", coluna, desde_iso, ate_iso)
+        for coluna in ("tentativa_1", "tentativa_2", "tentativa_3")
+    )
+
+
+def _retornados_no_periodo(desde_iso: str, ate_iso: str) -> int:
+    return (
+        _contar_no_intervalo("tratativas", "data_resposta", desde_iso, ate_iso)
+        + _contar_no_intervalo("ligacoes", "created_at", desde_iso, ate_iso, {"retornou": True})
+    )
+
+
+def _agendamentos_confirmados_no_periodo(desde_iso: str, ate_iso: str) -> int:
+    return _contar_no_intervalo("ligacoes", "created_at", desde_iso, ate_iso, {"conseguiu_agendar": True})
+
+
+def _concluidos_no_periodo(desde_iso: str, ate_iso: str) -> int:
+    return (
+        _contar_no_intervalo("tratativas", "finalizado_em", desde_iso, ate_iso)
+        + _contar_no_intervalo("puma_encaminhamentos", "concluido_em", desde_iso, ate_iso)
+    )
+
+
+def _formatar_percentual(valor: float) -> str:
+    return f"{valor * 100:.1f}%"
+
+
+def _pct_resposta_no_periodo(desde_iso: str, ate_iso: str) -> str:
+    disparos = _disparos_no_periodo(desde_iso, ate_iso)
+    retornados = _retornados_no_periodo(desde_iso, ate_iso)
+    return _formatar_percentual(retornados / disparos if disparos > 0 else 0)
+
+
+def _dias_entre(inicio_iso: str, fim_iso: str) -> float:
+    inicio = datetime.fromisoformat(inicio_iso.replace("Z", "+00:00"))
+    fim = datetime.fromisoformat(fim_iso.replace("Z", "+00:00"))
+    return (fim - inicio).total_seconds() / 86400
+
+
+def _tempo_medio_resolucao_no_periodo(desde_iso: str, ate_iso: str) -> str:
+    """Porta fiel de `buscarTempoMedioResolucao` (TS) — dias entre
+    `created_at` e a conclusão (direta em `tratativas.finalizado_em`, ou via
+    `puma_encaminhamentos.concluido_em`, buscando `created_at` da tratativa
+    original numa 2ª consulta)."""
+    client = get_client()
+    dias: list[float] = []
+
+    diretas = (
+        client.table("tratativas").select("created_at, finalizado_em")
+        .gte("finalizado_em", desde_iso).lte("finalizado_em", ate_iso).execute().data or []
+    )
+    for linha in diretas:
+        dias.append(_dias_entre(linha["created_at"], linha["finalizado_em"]))
+
+    via_puma = (
+        client.table("puma_encaminhamentos").select("tratativa_id, concluido_em")
+        .gte("concluido_em", desde_iso).lte("concluido_em", ate_iso).execute().data or []
+    )
+    if via_puma:
+        ids = [linha["tratativa_id"] for linha in via_puma]
+        tratativas = client.table("tratativas").select("id, created_at").in_("id", ids).execute().data or []
+        criado_por_id = {linha["id"]: linha["created_at"] for linha in tratativas}
+        for linha in via_puma:
+            criado_em = criado_por_id.get(linha["tratativa_id"])
+            if criado_em:
+                dias.append(_dias_entre(criado_em, linha["concluido_em"]))
+
+    if not dias:
+        return "—"
+    return f"{sum(dias) / len(dias):.1f} dias"
+
+
+def _taxa_escalonamento_puma_no_periodo(desde_iso: str, ate_iso: str) -> str:
+    total = _contar_no_intervalo("ligacoes", "created_at", desde_iso, ate_iso)
+    if total == 0:
+        return "—"
+    nao_retornaram = _contar_no_intervalo("ligacoes", "created_at", desde_iso, ate_iso, {"retornou": False})
+    return _formatar_percentual(nao_retornaram / total)
+
+
+def _estado_fim_periodo(ate_iso: str) -> dict:
+    """Reconstrução do estado no FIM do período filtrado (RPC `dashboard_
+    estado_em`, `p_data=ate_iso`) — mesma agregação de `_estado_por_origem_
+    agora`, somando todas as origens juntas (não por origem). Reaproveitada
+    por `pendentes`/`em_andamento`/`pct_pendencias`/`pct_pendencias_
+    concluidas` numa só chamada ao RPC (`montar_metricas_admin_operador`),
+    em vez de 1 chamada por chave."""
+    client = get_client()
+    linhas = client.rpc("dashboard_estado_em", {"p_data": ate_iso}).execute().data or []
+    estado = {"pendente": 0, "em_andamento": 0, "concluido": 0}
+    for linha in linhas:
+        quantidade = int(linha["quantidade"])
+        if linha["bucket"] == "pendente":
+            estado["pendente"] += quantidade
+        elif linha["bucket"] == "concluido":
+            estado["concluido"] += quantidade
+        else:
+            estado["em_andamento"] += quantidade
+    return estado
+
+
+_CHAVES_ESTADO_FIM_PERIODO = ("pendentes", "em_andamento", "pct_pendencias", "pct_pendencias_concluidas")
+
+_CALCULO_PERIODO_POR_CHAVE = {
+    "disparos": _disparos_no_periodo,
+    "retornados": _retornados_no_periodo,
+    "agendamentos_confirmados": _agendamentos_confirmados_no_periodo,
+    "concluidos": _concluidos_no_periodo,
+    "pct_resposta": _pct_resposta_no_periodo,
+    "tempo_medio_resolucao": _tempo_medio_resolucao_no_periodo,
+    "taxa_escalonamento_puma": _taxa_escalonamento_puma_no_periodo,
+}
+
+
 _CALCULO_POR_CHAVE = {
     "pendencias_em_aberto": _pendencias_em_aberto_agora,
     "encaminhadas_puma": _encaminhadas_para_puma_agora,
@@ -278,14 +430,25 @@ _CALCULO_POR_CHAVE = {
 }
 
 
-def montar_metricas_admin_operador() -> dict:
+def montar_metricas_admin_operador(desde: date | None = None, ate: date | None = None) -> dict:
     """Lê `dashboard_metricas_cliente` (só as chaves com `visivel_operador
     = true` e que já têm cálculo implementado aqui) e devolve
     `{"metricas_simples": {chave: valor}, "metricas_lista": {chave: [...]},
     "metricas_grafico": {chave: ...}}` — uma chave só aparece se estiver
-    marcada visível."""
+    marcada visível.
+
+    `desde`/`ate` (2026-08-14) só afetam as métricas "de período"
+    (`_CALCULO_PERIODO_POR_CHAVE`/`_CHAVES_ESTADO_FIM_PERIODO`) — as demais
+    ("agora"/janela fixa) ignoram esses parâmetros. Default (quando o
+    Painel Operador ainda não aplicou filtro nenhum): últimos 30 dias."""
     client = get_client()
-    chaves_conhecidas = list(_CALCULO_POR_CHAVE.keys())
+    desde_iso_default, ate_iso_default = _janela_padrao_30_dias()
+    desde_iso = f"{desde.isoformat()}T00:00:00.000Z" if desde else desde_iso_default
+    ate_iso = f"{ate.isoformat()}T23:59:59.999Z" if ate else ate_iso_default
+
+    chaves_conhecidas = (
+        list(_CALCULO_POR_CHAVE.keys()) + list(_CALCULO_PERIODO_POR_CHAVE.keys()) + list(_CHAVES_ESTADO_FIM_PERIODO)
+    )
     linhas = (
         client.table("dashboard_metricas_cliente")
         .select("chave, visivel_operador")
@@ -300,12 +463,30 @@ def montar_metricas_admin_operador() -> dict:
     metricas_lista = {}
     metricas_grafico = {}
     for chave in chaves_visiveis:
-        valor = _CALCULO_POR_CHAVE[chave]()
-        if chave in _METRICAS_SIMPLES:
-            metricas_simples[chave] = valor
-        elif chave in _METRICAS_LISTA:
-            metricas_lista[chave] = valor
-        elif chave in _METRICAS_GRAFICO:
-            metricas_grafico[chave] = valor
+        if chave in _CALCULO_POR_CHAVE:
+            valor = _CALCULO_POR_CHAVE[chave]()
+            if chave in _METRICAS_SIMPLES:
+                metricas_simples[chave] = valor
+            elif chave in _METRICAS_LISTA:
+                metricas_lista[chave] = valor
+            elif chave in _METRICAS_GRAFICO:
+                metricas_grafico[chave] = valor
+        elif chave in _CALCULO_PERIODO_POR_CHAVE:
+            metricas_simples[chave] = _CALCULO_PERIODO_POR_CHAVE[chave](desde_iso, ate_iso)
+
+    chaves_estado_visiveis = chaves_visiveis & set(_CHAVES_ESTADO_FIM_PERIODO)
+    if chaves_estado_visiveis:
+        estado = _estado_fim_periodo(ate_iso)
+        total = estado["pendente"] + estado["em_andamento"] + estado["concluido"]
+        if "pendentes" in chaves_estado_visiveis:
+            metricas_simples["pendentes"] = estado["pendente"]
+        if "em_andamento" in chaves_estado_visiveis:
+            metricas_simples["em_andamento"] = estado["em_andamento"]
+        if "pct_pendencias" in chaves_estado_visiveis:
+            metricas_simples["pct_pendencias"] = _formatar_percentual(estado["pendente"] / total if total > 0 else 0)
+        if "pct_pendencias_concluidas" in chaves_estado_visiveis:
+            metricas_simples["pct_pendencias_concluidas"] = _formatar_percentual(
+                estado["concluido"] / total if total > 0 else 0
+            )
 
     return {"metricas_simples": metricas_simples, "metricas_lista": metricas_lista, "metricas_grafico": metricas_grafico}

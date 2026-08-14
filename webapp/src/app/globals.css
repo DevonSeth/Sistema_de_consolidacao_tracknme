@@ -804,6 +804,12 @@ td.acoes {
   accent-color: var(--accent);
   cursor: pointer;
 }
+.visibilidade + .visibilidade {
+  top: 27px;
+}
+.print-only {
+  display: none;
+}
 .grafico-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1183,6 +1189,10 @@ td.acoes {
   .busca-tabela,
   .visibilidade {
     display: none !important;
+  }
+
+  .print-only {
+    display: flex !important;
   }
 
   .app-shell {

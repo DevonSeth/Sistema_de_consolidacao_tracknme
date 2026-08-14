@@ -435,18 +435,38 @@ const METRICAS_ADMIN_SIMPLES_LABEL = {
   encaminhadas_puma: "Pendências encaminhadas à Puma (agora)",
 };
 
+// Métricas "de período" (2026-08-14) — só estas respeitam o filtro
+// De/Até novo; renderizam num grid próprio (`#resumo-grid-periodo`),
+// separado do `.resumo-grid` nativo (que é sempre "agora").
+const METRICAS_ADMIN_PERIODO_LABEL = {
+  disparos: "Total de disparos",
+  retornados: "Associados retornados",
+  agendamentos_confirmados: "Agendamentos confirmados",
+  concluidos: "Serviços concluídos no período",
+  pct_resposta: "% de resposta (retornos / disparos)",
+  tempo_medio_resolucao: "Tempo médio de resolução",
+  taxa_escalonamento_puma: "Taxa de escalonamento pra Puma",
+  pendentes: "Serviços pendentes",
+  em_andamento: "Serviços em andamento",
+  pct_pendencias: "% de pendências",
+  pct_pendencias_concluidas: "% de pendências concluídas",
+};
+
 const METRICAS_ADMIN_LISTA_META = {
   pendentes_por_cidade: { titulo: "Pendentes por cidade", desc: "Serviços com status pendente, agrupados por cidade." },
 };
 
 function renderizarMetricasSimplesAdmin(metricasSimples) {
   document.querySelectorAll(".resumo-card-admin").forEach((el) => el.remove());
-  const grid = document.querySelector(".resumo-grid");
+  const gridAgora = document.querySelector(".resumo-grid");
+  const gridPeriodo = document.getElementById("resumo-grid-periodo");
   for (const [chave, valor] of Object.entries(metricasSimples ?? {})) {
+    const noPeriodo = chave in METRICAS_ADMIN_PERIODO_LABEL;
+    const label = noPeriodo ? METRICAS_ADMIN_PERIODO_LABEL[chave] : (METRICAS_ADMIN_SIMPLES_LABEL[chave] ?? chave);
     const card = document.createElement("div");
     card.className = "resumo-card resumo-card-admin";
-    card.innerHTML = `<div class="rotulo">${METRICAS_ADMIN_SIMPLES_LABEL[chave] ?? chave}</div><div class="valor">${valor}</div>`;
-    grid.appendChild(card);
+    card.innerHTML = `<div class="rotulo">${label}</div><div class="valor">${valor}</div>`;
+    (noPeriodo ? gridPeriodo : gridAgora).appendChild(card);
   }
 }
 
@@ -584,8 +604,30 @@ function renderizarMetricasGraficoAdmin(metricasGrafico) {
   }
 }
 
-async function carregarMetricasAdminOperador() {
-  const dados = await api().obter_metricas_admin_operador();
+function janelaPadrao30Dias() {
+  const hoje = new Date();
+  const desde = new Date(hoje);
+  desde.setDate(desde.getDate() - 29);
+  const paraISO = (d) => d.toISOString().slice(0, 10);
+  return { desde: paraISO(desde), ate: paraISO(hoje) };
+}
+
+function inicializarFiltroPeriodoAdmin() {
+  const form = document.getElementById("filtro-periodo-admin");
+  const inputDesde = document.getElementById("filtro-desde");
+  const inputAte = document.getElementById("filtro-ate");
+  const { desde, ate } = janelaPadrao30Dias();
+  inputDesde.value = desde;
+  inputAte.value = ate;
+
+  form.addEventListener("submit", (evento) => {
+    evento.preventDefault();
+    carregarMetricasAdminOperador(inputDesde.value, inputAte.value);
+  });
+}
+
+async function carregarMetricasAdminOperador(desde, ate) {
+  const dados = await api().obter_metricas_admin_operador(desde, ate);
   renderizarMetricasSimplesAdmin(dados.metricas_simples);
   renderizarMetricasListaAdmin(dados.metricas_lista);
   renderizarMetricasGraficoAdmin(dados.metricas_grafico);
@@ -664,7 +706,9 @@ function init() {
 
   carregarEtapas();
   carregarDashboardsOperador();
-  carregarMetricasAdminOperador();
+  inicializarFiltroPeriodoAdmin();
+  const { desde, ate } = janelaPadrao30Dias();
+  carregarMetricasAdminOperador(desde, ate);
   carregarWatchdog();
   atualizarBotoes();
   pollProgresso();

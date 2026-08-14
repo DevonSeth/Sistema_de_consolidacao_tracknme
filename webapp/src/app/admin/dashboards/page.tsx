@@ -12,6 +12,7 @@ import {
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
 
 import BotaoImprimir from "@/app/dashboard/BotaoImprimir";
+import CabecalhoImpressao from "@/app/dashboard/CabecalhoImpressao";
 import UltimaAtualizacao from "@/app/dashboard/UltimaAtualizacao";
 
 import DashboardsClient from "./DashboardsClient";
@@ -50,6 +51,7 @@ export default async function DashboardsPage({
 
   return (
     <>
+      <CabecalhoImpressao />
       <div className="page-header">
         <h1>Dashboards</h1>
         <div className="desc">

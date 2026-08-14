@@ -304,6 +304,94 @@ de Negócio já são telas de verdade, funcionando contra o Supabase
 real — faltam Configuração e Dashboards (ver `_handoff/HANDOFF.md`
 pro estado exato e o que falta em cada uma).
 
+## 11. Painel Admin (app web) — cada tela, pra quem nunca usou
+
+Expandido em 2026-08-14 (chat #16) — antes desta seção, este documento
+só cobria o cadastro na planilha Instalação-Remoção (seções 1-10). O
+Painel Admin é a tela web (`https://sistema-de-consolidacao-tracknme.
+vercel.app/admin`, login com e-mail/senha) onde o administrador
+configura o sistema — não é onde o dia a dia de atendimento acontece
+(isso continua no Google Sheets, ver seções anteriores, e no Painel
+Operador, `docs/pop_operador.md`). O menu lateral tem 6 itens:
+
+### Parâmetros de Negócio
+
+Os limiares e listas que hoje ficariam "escondidos" no código —
+editáveis aqui, com busca e filtro por categoria (Geral, Risco de
+veículo, Prazos, Esteira de disparo, Observabilidade). Exemplos: quantas
+horas um equipamento fica sem comunicar antes de virar incidente,
+quais modelos de moto contam como "alto risco de furto", o horário de
+corte do disparo de WhatsApp. **Editar aqui tem efeito imediato no
+próximo ciclo automático** — não precisa de deploy nem reiniciar nada.
+Use a busca se não souber em qual categoria um parâmetro está; o texto
+de cada linha já explica o que ele controla.
+
+### Cadastros
+
+3 abas:
+- **Bases** — os locais onde o associado pode ir instalar/rastrear
+  (nome, endereço, ativo/inativo). Usado no disparo de WhatsApp quando
+  o atendimento marca `Atendimento = Base` numa pendência.
+- **Pontos de Ação** — locais de ação com data marcada (mutirões,
+  eventos). Mesma lógica das Bases, mas com uma data associada.
+- **Regras** — as ~31 linhas de `rule_templates` que o motor de regras
+  usa pra decidir texto de ação/observação e nível de urgência de cada
+  código (`REGRA_1`, `REGRA_5_1` etc.). Editável por linha: texto de
+  observação, texto de ação, nível de urgência (1-5), ativo/inativo.
+  `Prioridade` aparece só pra leitura — é metadado descritivo, não
+  decide a ordem real da cascata de regras (isso é fixo no código).
+
+### Configuração
+
+As credenciais de cada integração (Track N'Me, Newmo/WhatsApp,
+Supabase, Google Sheets), guardadas no Vault (nunca em texto puro em
+lugar nenhum acessível). Pra cada uma: **"Testar conexão"** confirma
+que a credencial ainda funciona de verdade (chama a API real) —
+**exceto Track N'Me**, que exige um navegador com captcha manual,
+então só é testável rodando o Painel Operador local. **"Editar"** abre
+os campos pra atualizar um valor (ex: token expirou, senha mudou).
+
+**Importante**: editar uma credencial aqui grava no Vault central, mas
+**só passa a valer nas máquinas do Painel Operador quando o Launcher
+existir** (Fase 1, ainda não construída) — até lá, cada máquina
+continua com a credencial que já tem localmente (keyring do Windows),
+e uma atualização feita aqui não chega lá sozinha.
+
+### Dashboards
+
+Os números de negócio, com filtro De/Até no topo (a maioria respeita o
+filtro; algumas, marcadas "Estado agora", mostram sempre o momento
+atual, ignorando o filtro — o rótulo da seção já avisa qual é qual).
+Cada métrica tem até 2 caixinhas de visibilidade:
+- **"Visível no Dashboard Cliente"** — aparece pro link que a Puma usa
+  pra acompanhar (sem login, sem acesso a mais nada do sistema).
+- **"Visível no Painel Operador"** — aparece na aba "Painel de apoio"
+  do Painel Operador local, pro atendimento acompanhar sem precisar
+  abrir o Admin. Nem toda métrica tem essa opção (só as que o Painel
+  Operador já sabe calcular/desenhar).
+Nenhuma das duas afeta o que VOCÊ vê aqui no Admin — o Admin sempre
+mostra tudo, essas caixinhas só controlam o que os OUTROS 2 públicos
+enxergam.
+
+**Baixar PDF** exporta a tela atual (com o filtro aplicado) num formato
+de impressão limpo, com o cabeçalho "Relatório de pendências - Viver de
+Rastreamento" — usa o "Imprimir" do próprio navegador (`Ctrl+P`/
+`Cmd+P`), não baixa um arquivo direto; escolha "Salvar como PDF" na
+tela de impressão do navegador.
+
+### Manual do Sistema
+
+Esta mesma documentação, dentro do próprio app — pra não precisar sair
+da tela pra consultar.
+
+### Abrir Painel Operador
+
+Atalho pra abrir o Painel Operador já instalado nesta máquina, sem
+precisar procurar o ícone/pasta. **Só funciona depois que a Fase 1
+(Launcher/instalador) estiver pronta** — até lá, clicar não faz nada
+(infraestrutura já existe, esperando o instalador registrar o atalho
+no Windows).
+
 ## Em aberto (ainda não confirmado com o usuário)
 
 - Os dados exatos que entram na aba "Dashboards" do Painel Admin —

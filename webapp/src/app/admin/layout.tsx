@@ -28,6 +28,16 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         <Link className="nav-item" href="/admin/dashboards">
           <span className="ic">▤</span> Dashboards
         </Link>
+        <Link className="nav-item" href="/admin/manual">
+          <span className="ic">📖</span> Manual do Sistema
+        </Link>
+        <a
+          className="nav-item"
+          href="tracknme-operador://abrir"
+          title="Requer o Painel Operador instalado nesta máquina"
+        >
+          <span className="ic">🖥</span> Abrir Painel Operador
+        </a>
 
         <div className="sidebar-footer">
           <div className="papel">👤 Administrador</div>

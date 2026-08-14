@@ -9,7 +9,9 @@ servidor HTTP local.
 Métodos expostos (chamados pelo `app.js`, Passo 6):
     listar_etapas_com_status()          # catálogo + status (5 estados) + contagem por origem
     obter_dashboards_operador()         # os 6 widgets nativos do "Painel de apoio"
-    obter_metricas_admin_operador()     # métricas "emprestadas" do Admin, só as marcadas visivel_operador=true
+    obter_metricas_admin_operador(desde, ate)  # métricas "emprestadas" do Admin, só as marcadas
+                                        # visivel_operador=true; desde/ate (strings "AAAA-MM-DD",
+                                        # opcionais) só afetam as métricas "de período" (2026-08-14)
     obter_status_watchdog()             # Observabilidade fatia 1: travada/etapas com falha/etapas lentas
     executar_etapas(lista_ids, modo)    # modo: 'todas' | 'selecionadas' | 'a_partir_de:<id>'
     cancelar_execucao()
@@ -32,6 +34,7 @@ import asyncio
 import json
 import sys
 import threading
+from datetime import date
 from pathlib import Path
 
 from integrations import supabase_client
@@ -228,8 +231,10 @@ class Api:
     def obter_dashboards_operador(self) -> dict:
         return _para_json_seguro(dashboards_operador.montar_dashboards_operador())
 
-    def obter_metricas_admin_operador(self) -> dict:
-        return _para_json_seguro(metricas_admin_operador.montar_metricas_admin_operador())
+    def obter_metricas_admin_operador(self, desde: str | None = None, ate: str | None = None) -> dict:
+        desde_data = date.fromisoformat(desde) if desde else None
+        ate_data = date.fromisoformat(ate) if ate else None
+        return _para_json_seguro(metricas_admin_operador.montar_metricas_admin_operador(desde_data, ate_data))
 
     def obter_status_watchdog(self) -> dict:
         return _para_json_seguro(watchdog.avaliar_watchdog())

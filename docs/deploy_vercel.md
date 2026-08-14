@@ -236,6 +236,17 @@ nem pywebview) — na abertura:
 Isso nunca sobrescreve um `.exe` em execução (decisão já fechada —
 frágil no Windows) — cada versão vive na sua própria pasta.
 
+**Registro do protocolo customizado** (2026-08-14, chat #16): o Painel
+Admin (`webapp/src/app/admin/layout.tsx`) já tem um link `Abrir Painel
+Operador` apontando pra `tracknme-operador://abrir` — hoje não faz nada
+(nenhum programa está registrado pra esse protocolo). O instalador/
+`Launcher.exe` desta fase precisa registrar esse protocolo no Windows
+(chave de registro `HKEY_CURRENT_USER\Software\Classes\tracknme-
+operador`, `shell\open\command` apontando pro `Launcher.exe`) — mesmo
+princípio usado por launchers tipo Riot/Steam/Discord (`riot://`,
+`steam://`). Sem isso, o botão do Admin não abre nada — comportamento
+esperado até este passo ser implementado.
+
 ### 1.5 🧑🤖 Testar o build localmente (juntos)
 
 Rodar o `Launcher.exe` + `PainelOperador.exe` gerados nesta própria

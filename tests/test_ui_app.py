@@ -314,9 +314,45 @@ def test_obter_metricas_admin_operador_devolve_shape_do_modulo(monkeypatch):
     from orchestrator import metricas_admin_operador
 
     fake = {"metricas_simples": {"pendencias_em_aberto": 5}, "metricas_lista": {"pendentes_por_cidade": []}}
-    monkeypatch.setattr(metricas_admin_operador, "montar_metricas_admin_operador", lambda: fake)
+    monkeypatch.setattr(metricas_admin_operador, "montar_metricas_admin_operador", lambda desde, ate: fake)
 
     assert app.Api().obter_metricas_admin_operador() == fake
+
+
+def test_obter_metricas_admin_operador_converte_desde_ate_pra_date(monkeypatch):
+    from datetime import date
+
+    from orchestrator import metricas_admin_operador
+
+    capturado = {}
+
+    def _fake(desde, ate):
+        capturado["desde"] = desde
+        capturado["ate"] = ate
+        return {}
+
+    monkeypatch.setattr(metricas_admin_operador, "montar_metricas_admin_operador", _fake)
+
+    app.Api().obter_metricas_admin_operador("2026-07-01", "2026-08-14")
+
+    assert capturado == {"desde": date(2026, 7, 1), "ate": date(2026, 8, 14)}
+
+
+def test_obter_metricas_admin_operador_sem_argumentos_passa_none(monkeypatch):
+    from orchestrator import metricas_admin_operador
+
+    capturado = {}
+
+    def _fake(desde, ate):
+        capturado["desde"] = desde
+        capturado["ate"] = ate
+        return {}
+
+    monkeypatch.setattr(metricas_admin_operador, "montar_metricas_admin_operador", _fake)
+
+    app.Api().obter_metricas_admin_operador()
+
+    assert capturado == {"desde": None, "ate": None}
 
 
 def test_obter_status_watchdog_devolve_shape_do_modulo(monkeypatch):
