@@ -1,0 +1,20 @@
+# Dependências previstas — ajustar versões exatas quando iniciar a implementação
+# no Claude Code.
+
+pywebview==6.2.1   # janela nativa da interface
+playwright         # robôs Track N' Me e SGA
+supabase           # cliente Supabase
+gspread            # leitura/escrita Google Sheets
+httpx              # cliente HTTP síncrono — integrations/newmo_client.py (era só transitivo via supabase/postgrest)
+google-auth        # service account (Sheets) e OAuth (Gmail)
+google-api-python-client  # Gmail API
+keyring            # armazenamento seguro de segredos no SO
+cryptography       # decriptação do seed
+openpyxl           # leitura dos relatórios baixados (Excel)
+pyinstaller        # empacotamento final em executável
+tzdata             # base IANA de fusos horários (zoneinfo não a inclui no Windows) — core.escalonamento
+holidays           # calendário de feriados BR (orchestrator, ainda não implementado — core.escalonamento recebe já pronto)
+
+# --- dev / testes (não vai pro executável final) ---
+pytest             # testes unitários de core/
+pytest-asyncio     # testes unitários de código async (integrations/playwright_utils.py)

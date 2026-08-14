@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+logs/*.log
+downloads/
+_handoff/
+config/*.enc
+*.json
+!requirements.txt
+!supabase/**/*.json
+!webapp/package.json
+!webapp/package-lock.json
+!webapp/tsconfig.json
+.env
+supabase/.temp/
+

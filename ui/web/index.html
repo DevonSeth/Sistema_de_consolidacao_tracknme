@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Consolidação Track N'Me — Operação</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <nav class="sidebar">
+      <div class="sidebar-brand">
+        <div class="mark"><img src="assets/logo.png" alt="Viver de Rastreamento" /></div>
+        <div>
+          <div class="name">Consolidação Track N'Me</div>
+          <div class="sub">Painel Operador</div>
+        </div>
+      </div>
+
+      <div class="sidebar-section-label">Menu</div>
+      <button class="nav-item active"><span class="ic">▣</span> Operação</button>
+    </nav>
+
+    <main class="content">
+      <div class="page-header">
+        <div>
+          <h1>Operação</h1>
+          <div class="desc">Rode e acompanhe as etapas do robô, uma a uma ou em cadeia.</div>
+        </div>
+      </div>
+
+      <div class="banner-watchdog" id="banner-watchdog" hidden></div>
+
+      <div class="resumo-grid">
+        <div class="resumo-card">
+          <div class="rotulo"><span class="dot manutencao"></span>Manutenção — por tratar</div>
+          <div class="valor" id="resumo-manutencao">—</div>
+        </div>
+        <div class="resumo-card">
+          <div class="rotulo"><span class="dot instalacao"></span>Instalação — por tratar</div>
+          <div class="valor" id="resumo-instalacao">—</div>
+        </div>
+        <div class="resumo-card">
+          <div class="rotulo"><span class="dot remocao"></span>Remoção — por tratar</div>
+          <div class="valor" id="resumo-remocao">—</div>
+        </div>
+        <div class="resumo-card robo">
+          <div class="rotulo">Status do robô</div>
+          <div class="valor"><span class="robo-dot" id="robo-dot"></span><span id="robo-texto">Ocioso</span></div>
+        </div>
+      </div>
+
+      <div class="painel-apoio-titulo">Painel de apoio</div>
+      <div class="painel-apoio-grid">
+        <div class="widget-apoio full" id="widget-fila-prioridade"></div>
+        <div class="widget-apoio" id="widget-sem-atendimento"></div>
+        <div class="widget-apoio" id="widget-funil-status"></div>
+        <div class="widget-apoio" id="widget-situacao-manual-parada"></div>
+        <div class="widget-apoio" id="widget-contato-invalido"></div>
+        <div class="widget-apoio full" id="widget-discrepancia-remocao"></div>
+      </div>
+
+      <div class="painel-apoio-grid" id="painel-graficos-admin"></div>
+
+      <div class="banner-reconexao" id="banner-reconexao" hidden>
+        <span id="banner-reconexao-texto"></span>
+        <button id="btn-continuar">Já logei, continuar</button>
+      </div>
+
+      <div class="banner-travado" id="banner-travado" hidden>
+        Outra máquina já está executando o robô agora — aguarde terminar antes de rodar de novo.
+      </div>
+
+      <div class="barra-acoes">
+        <button class="btn primary" id="btn-executar-selecionadas">Executar selecionadas</button>
+        <button class="btn ghost" id="btn-executar-tudo">Executar tudo</button>
+        <button class="btn perigo" id="btn-cancelar" disabled>Cancelar</button>
+        <div class="spacer"></div>
+        <div class="selecionadas-info" id="selecionadas-info">0 etapas selecionadas</div>
+      </div>
+
+      <div id="lista-fases"></div>
+
+      <div class="legenda">
+        <div class="item"><span class="selo selo-ocioso">Ocioso</span> nunca rodou / esperando</div>
+        <div class="item"><span class="selo selo-rodando">Rodando</span> em execução agora</div>
+        <div class="item"><span class="selo selo-sucesso">Sucesso</span> concluída sem erro</div>
+        <div class="item"><span class="selo selo-erro">Erro</span> falhou, ver mensagem</div>
+        <div class="item"><span class="selo selo-aguardando_reconexao">Aguardando você</span> sessão caiu, precisa relogar</div>
+      </div>
+
+      <footer class="rodape-creditos">
+        Desenvolvido por Devon em parceria com a Viver de Rastreamento — devon@hazelab.tec.br
+      </footer>
+    </main>
+  </div>
+
+  <script src="charts.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

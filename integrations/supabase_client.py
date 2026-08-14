@@ -1,0 +1,846 @@
+"""
+Cliente de acesso ao Supabase — única fonte de verdade do sistema.
+
+Tabelas já existem em produção (não recriar). Schema real (via introspecção
+OpenAPI do PostgREST, confirmado em conversa com o cliente para os campos de
+texto livre):
+
+    tratativas
+        id (uuid, pk), chave_unica (text, chave de dedup — ver core.dedup),
+        origem (text: 'instalacao' | 'remocao' | 'manutencao'),
+        identificador (text — placa OU chassi, conforme tipo_identificador),
+        chassi (text, sempre disponível como backup),
+        placa (text — placa crua do veículo, pode ser fictícia/vazia),
+        modelo (text — modelo do veículo, fallback de `placa` na mensagem
+            de WhatsApp quando ela é fictícia/ausente, ver core.mensagens),
+        tipo_identificador (text: 'placa' | 'chassi' — uso interno do motor,
+            não aparece pro atendente),
+        cliente, telefone, cidade, bairro, data_referencia,
+        sga (text — situação vinda do SGA),
+        acao_sugerida, observacao_sistema (preenchidos por rule_templates),
+        codigo_regra (text — qual codigo_regra de rule_templates gerou esta
+            linha; usado pra derivar nivel_urgencia no relatório via join,
+            não é denormalizado aqui),
+        selecionado (bool — atendente marca manualmente pra disparo),
+        atendimento (text: 'base' | 'rota' | 'acao' — preenchido pelo
+            atendente, obrigatório antes do 1º disparo, Fase F.1),
+        base_id (uuid, fk -> bases.id, só quando atendimento='base'),
+        ponto_acao_id (uuid, fk -> pontos_acao.id, só quando
+            atendimento='acao'),
+        retorno_associado (text — preenchido pelo webhook, Fase F.2, ainda
+            não implementada; grava a discrepância que o associado
+            reportou clicando num botão de "Já foi realizado"),
+        status_contato (text ou null: null = normal,
+            'contato_invalido' = telefone não registrado no WhatsApp,
+            cód. 7 da Newmo — NÃO é o mesmo controle que `status`),
+        situacao_manual, data_agendada, observacao_manual,
+        tecnico (text — atribuído pelo atendente na planilha Operacional,
+            dropdown nativo do Google Sheets; persistido aqui pra não se
+            perder quando `reescrever_aba` regravar a aba do zero),
+        status (text, ciclo de vida completo: 'pendente',
+            'aguardando_resposta', 'respondido', 'aguardando_ligacao',
+            'encaminhado_puma', 'finalizado', 'bloqueado_sga'),
+        tentativas (int, 0-3), tentativa_1/2/3 (timestamptz de cada disparo),
+        ultimo_disparo, atendimento_id, mensagem_id (da Newmo, casam com o
+            webhook), resposta, data_resposta, created_at, updated_at
+
+    bases (Fase F.1 — WhatsApp)
+        id (uuid, pk), nome, endereco, ativo (bool)
+
+    pontos_acao (Fase F.1 — WhatsApp)
+        id (uuid, pk), nome_local, endereco, data, ativo (bool)
+
+    ligacoes
+        id (uuid, pk), tratativa_id (fk -> tratativas.id), data_contato,
+        retornou (bool), conseguiu_agendar (bool), observacao,
+        registrado_por, created_at
+
+    puma_encaminhamentos
+        id (uuid, pk), tratativa_id (fk -> tratativas.id), motivo,
+        data_encaminhamento, status (text: 'aguardando_acao' |
+        'em_andamento' | 'concluido'), observacao_puma
+
+    system_parameters
+        chave (pk), valor (text puro — precisa coerção de tipo na leitura,
+        ex: "48" -> 48, "true" -> True), descricao
+
+    rule_templates
+        id (uuid, pk), codigo_regra, ativo (bool), prioridade (int),
+        template_acao, template_observacao, nivel_urgencia (int, 1-5;
+        NULL para REGRA_4/REGRA_4_TIMESTAMP — dedup silencioso, nunca vira
+        linha visível)
+
+    situacao_veiculo_sga (2026-08-06, Instalação/Remoção)
+        chassi (text, pk), status (text — último status do SGA visto),
+        desde (timestamptz — quando ESSE status começou), atualizado_em
+        (timestamptz — última consulta, sempre atualiza). Ver
+        core.motor_regras_instalacao_remocao.atualizar_situacao_sga pra
+        a lógica pura de quando `desde` reinicia.
+
+Funções previstas — uma por operação de negócio, não um wrapper genérico de
+SQL, para manter o resto do código legível.
+
+    log_execucoes (Observabilidade, fatia 1, 2026-08-14)
+        id (uuid, pk), execucao_id (uuid — agrupa todas as etapas de uma
+        mesma rodada de `orchestrator.catalogo_etapas.executar_etapas_
+        com_contexto`, inclusive retomada pós-reconexão), etapa_id (text),
+        maquina (text), iniciado_em/finalizado_em (timestamptz),
+        duracao_ms (int), sucesso (bool), motivo_parada (text ou null:
+        null | 'falha' | 'cancelada' | 'aguardando_reconexao'), mensagem
+        (text), created_at.
+
+`log_acoes_automaticas` (auditoria por ação individual) ainda NÃO existe
+no banco — fica pra uma fatia 2 da Observabilidade, depois do diagnóstico
+de eficiência do SGA/Track N'Me.
+"""
+
+from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+
+from supabase import Client, create_client
+
+from config import manager
+from core.constants import (
+    ORIGEM_INSTALACAO,
+    ORIGEM_MANUTENCAO,
+    ORIGEM_REMOCAO,
+    PUMA_STATUS_AGUARDANDO_ACAO,
+    PUMA_STATUS_CONCLUIDO,
+    PUMA_STATUS_EM_ANDAMENTO,
+    STATUS_AGUARDANDO_LIGACAO,
+    STATUS_AGUARDANDO_RESPOSTA,
+    STATUS_BLOQUEADO_SGA,
+    STATUS_CONTATO_INVALIDO,
+    STATUS_ENCAMINHADO_PUMA,
+    STATUS_FINALIZADO,
+    STATUS_PENDENTE,
+    STATUS_RESPONDIDO,
+    TIPO_IDENTIFICADOR_CHASSI,
+    TIPO_IDENTIFICADOR_PLACA,
+)
+
+# Valores de origem/status vêm de core.constants (core/ não pode importar
+# integrations/, mas o inverso é permitido — ver docstring daquele módulo).
+# Reexportados aqui para não quebrar quem já importa daqui.
+__all__ = [
+    "ORIGEM_INSTALACAO",
+    "ORIGEM_REMOCAO",
+    "ORIGEM_MANUTENCAO",
+    "TIPO_IDENTIFICADOR_PLACA",
+    "TIPO_IDENTIFICADOR_CHASSI",
+    "STATUS_PENDENTE",
+    "STATUS_AGUARDANDO_RESPOSTA",
+    "STATUS_RESPONDIDO",
+    "STATUS_AGUARDANDO_LIGACAO",
+    "STATUS_ENCAMINHADO_PUMA",
+    "STATUS_FINALIZADO",
+    "STATUS_BLOQUEADO_SGA",
+    "STATUS_CONTATO_INVALIDO",
+    "PUMA_STATUS_AGUARDANDO_ACAO",
+    "PUMA_STATUS_EM_ANDAMENTO",
+    "PUMA_STATUS_CONCLUIDO",
+]
+
+# Estados de `tratativas.status` ainda dentro do ciclo de disparo de WhatsApp
+# (usados por buscar_elegiveis_para_disparo — filtragem fina por horário de
+# corte e nº de tentativas é feita por core.escalonamento a cada item).
+_STATUS_ELEGIVEIS_PARA_DISPARO = [STATUS_PENDENTE, STATUS_AGUARDANDO_RESPOSTA]
+
+
+def _agora_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _registrar_transicao_status(tratativa_id: str, status_novo: str) -> None:
+    """Histórico de mudança de status de uma tratativa (`historico_status_
+    tratativa`, Passo 1 do Dashboard) — alimenta a reconstrução "como
+    estava numa data X" (`dashboard_estado_em`, RPC). Só `status_novo` +
+    timestamp: nenhuma das funções que chamam isto lê o status atual antes
+    de escrever, e o "anterior" é sempre o `status_novo` da linha
+    imediatamente anterior — não precisa gravar 2x."""
+    get_client().table("historico_status_tratativa").insert(
+        {"tratativa_id": tratativa_id, "status_novo": status_novo}
+    ).execute()
+
+
+def _registrar_transicao_puma(puma_id: str, tratativa_id: str, status_novo: str) -> None:
+    """Espelho de `_registrar_transicao_status` para `puma_encaminhamentos`
+    (`historico_status_puma`) — `tratativa_id` denormalizado aqui de
+    propósito, evita join extra na hora de reconstruir o estado."""
+    get_client().table("historico_status_puma").insert(
+        {
+            "puma_encaminhamento_id": puma_id,
+            "tratativa_id": tratativa_id,
+            "status_novo": status_novo,
+        }
+    ).execute()
+
+
+@lru_cache(maxsize=1)
+def get_client() -> Client:
+    """Cliente Supabase, criado uma única vez (singleton). Se a config for
+    resalva com credenciais novas em runtime, chamar `get_client.cache_clear()`
+    antes da próxima chamada.
+    """
+    cfg = manager.carregar_config()["supabase"]
+    return create_client(cfg["url"], cfg["service_role_key"])
+
+
+def buscar_elegiveis_para_disparo() -> list[dict]:
+    """Tratativas marcadas pelo atendente (`selecionado=True`) e ainda dentro
+    do ciclo de mensagens automáticas (não bloqueadas por SGA, não escaladas
+    para ligação, com telefone válido). A elegibilidade fina por item
+    (tentativas < 3, horário de corte) é responsabilidade de
+    `core.escalonamento.elegivel_para_disparo`, chamada a cada item do loop.
+    """
+    client = get_client()
+    resposta = (
+        client.table("tratativas")
+        .select("*")
+        .eq("selecionado", True)
+        .in_("status", _STATUS_ELEGIVEIS_PARA_DISPARO)
+        .is_("status_contato", "null")
+        .execute()
+    )
+    return resposta.data
+
+
+def buscar_candidatas_escalonamento_ligacao() -> list[dict]:
+    """Tratativas ainda no ciclo de mensagens (`status='aguardando_resposta'`)
+    — elegibilidade fina (tentativas >= 3, sem `situacao_manual`) é
+    responsabilidade de `core.escalonamento.deve_escalar_para_ligacao`,
+    chamada a cada item pelo orchestrator (mesmo padrão de
+    `buscar_elegiveis_para_disparo`, que também deixa o filtro fino pro
+    core).
+    """
+    client = get_client()
+    resposta = (
+        client.table("tratativas")
+        .select("*")
+        .eq("status", STATUS_AGUARDANDO_RESPOSTA)
+        .execute()
+    )
+    return resposta.data
+
+
+def buscar_candidatas_finalizacao_atendimento() -> list[dict]:
+    """Tratativas com um atendimento Newmo aberto (`atendimento_id IS NOT
+    NULL`) e ainda no ciclo de mensagens — candidatas da rotina noturna
+    de `orchestrator.pipeline.etapa_finalizar_atendimentos_diarios`. O
+    critério fino (tentativas < 3, sem `situacao_manual`/`retorno_
+    associado` pendente) é responsabilidade do orchestrator, mesmo padrão
+    de `buscar_elegiveis_para_disparo`/`buscar_candidatas_escalonamento_
+    ligacao`."""
+    client = get_client()
+    resposta = (
+        client.table("tratativas")
+        .select("*")
+        .in_("status", _STATUS_ELEGIVEIS_PARA_DISPARO)
+        .not_.is_("atendimento_id", "null")
+        .execute()
+    )
+    return resposta.data
+
+
+def upsert_tratativa(dados: dict) -> None:
+    """Insere uma tratativa nova ou atualiza a existente, usando
+    `chave_unica` (ver core.dedup.gerar_chave_unica) como chave de busca —
+    não depende de constraint UNIQUE no banco, faz select-then-write.
+    """
+    if "chave_unica" not in dados:
+        raise ValueError("dados precisa conter 'chave_unica' para upsert_tratativa")
+
+    client = get_client()
+    existente = (
+        client.table("tratativas")
+        .select("id")
+        .eq("chave_unica", dados["chave_unica"])
+        .execute()
+        .data
+    )
+    if existente:
+        payload = dict(dados)
+        payload["updated_at"] = _agora_utc_iso()
+        client.table("tratativas").update(payload).eq(
+            "chave_unica", dados["chave_unica"]
+        ).execute()
+    else:
+        payload = dict(dados)
+        payload.setdefault("status", STATUS_PENDENTE)
+        resultado = client.table("tratativas").insert(payload).execute()
+        nova_id = resultado.data[0]["id"]
+        # Linha "genesis" do histórico — garante que toda tratativa tem ao
+        # menos 1 linha, então `dashboard_estado_em` sempre acha resposta
+        # pra qualquer data >= criação.
+        _registrar_transicao_status(nova_id, payload["status"])
+
+
+def buscar_estado_disparo_por_chaves(chaves: list[str]) -> dict[str, dict]:
+    """Estado do ciclo de disparo (Fase F, ainda não implementada) por
+    `chave_unica` — usado pela Fase E (`orchestrator.pipeline.
+    etapa_publicar_fila_operacional`) pra exibir `status`/`status_contato`/
+    `tentativa_1/2/3`/`resposta`/`data_resposta` na aba `Tratativas`
+    sempre frescos do Supabase, nunca do snapshot da aba anterior —
+    diferente dos campos de atendente (`sincronizar_campos_atendente`),
+    esses são escritos por OUTROS processos (disparo, webhook), não pelo
+    atendente editando a planilha, então só ficam corretos se lidos de
+    volta do Supabase a cada ciclo.
+
+    Devolve `{chave_unica: {...}}`; `{}` se `chaves` for vazio (evita
+    round-trip sem necessidade).
+    """
+    if not chaves:
+        return {}
+    client = get_client()
+    linhas = (
+        client.table("tratativas")
+        .select(
+            "chave_unica, status, status_contato, tentativa_1, tentativa_2, tentativa_3, "
+            "resposta, data_resposta, retorno_associado, created_at"
+        )
+        .in_("chave_unica", chaves)
+        .execute()
+        .data
+    )
+    return {linha["chave_unica"]: linha for linha in linhas}
+
+
+def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]:
+    """Valor ATUAL de `situacao_manual` por `chave_unica`, antes da
+    sincronização do ciclo — usada por `orchestrator.pipeline.
+    _sincronizar_atendente_da_aba` pra só gravar `situacao_manual_definida_em`
+    quando o valor muda de verdade (sem isso, `updated_at`/esse timestamp
+    seriam tocados todo ciclo, mesmo sem mudança).
+
+    Devolve `{chave_unica: situacao_manual}`; `{}` se `chaves` for vazio.
+    """
+    if not chaves:
+        return {}
+    client = get_client()
+    linhas = (
+        client.table("tratativas")
+        .select("chave_unica, situacao_manual")
+        .in_("chave_unica", chaves)
+        .execute()
+        .data
+    )
+    return {linha["chave_unica"]: linha.get("situacao_manual") or "" for linha in linhas}
+
+
+def buscar_tratativa_por_chave(chave_unica: str) -> dict | None:
+    """Tratativa completa por `chave_unica` — usado pela Fase F.4
+    (`orchestrator.pipeline.etapa_processar_resultado_ligacao`) pra
+    achar o `id` uuid real a partir do "ID (hash)" mostrado na aba
+    "Pendente de Ligação". `None` se a chave não existir (ex: linha de
+    exemplo/placeholder ainda na planilha).
+    """
+    client = get_client()
+    linhas = (
+        client.table("tratativas").select("*").eq("chave_unica", chave_unica).execute().data
+    )
+    return linhas[0] if linhas else None
+
+
+def sincronizar_campos_atendente(chave_unica: str, campos: dict) -> None:
+    """Grava de volta no Supabase os campos que só o atendente edita na
+    planilha Operacional (`Selecionado`, `Técnico`, `Situação Manual`,
+    `Data Agendada`, `Observação Manual`, `Discrepância revisada`, e
+    `status` quando `Finalizado` estiver marcado) — chamado pela Fase E
+    (`orchestrator.pipeline.etapa_publicar_fila_operacional`) antes de
+    `upsert_tratativa` reescrever os campos do motor, pra não perder
+    esse trabalho quando `reescrever_aba` limpar a aba inteira.
+
+    **Update puro, sem fallback de insert**: se `chave_unica` não
+    existir (ex: linha de exemplo/placeholder ainda na planilha, ou
+    linha já removida), a chamada não faz nada — nunca cria uma linha
+    nova só com campos de atendente, sem os campos do motor.
+
+    Quando `campos` inclui `"status"` (hoje só `STATUS_FINALIZADO`, ver
+    `orchestrator/pipeline.py`), também seta `finalizado_em` (se ainda
+    não vier em `campos`) e grava a transição no histórico — usa
+    `buscar_tratativa_por_chave` DEPOIS do update pra achar o `id` (e
+    também herda de quebra a mesma guarda de "chave não existe = não
+    faz nada", já que a busca simplesmente não acha nada).
+    """
+    client = get_client()
+    campos = dict(campos)
+    if campos.get("status") == STATUS_FINALIZADO:
+        campos.setdefault("finalizado_em", _agora_utc_iso())
+    client.table("tratativas").update(campos).eq("chave_unica", chave_unica).execute()
+
+    if "status" in campos:
+        tratativa = buscar_tratativa_por_chave(chave_unica)
+        if tratativa is not None:
+            _registrar_transicao_status(tratativa["id"], campos["status"])
+
+
+def atualizar_apos_envio(
+    tratativa_id: str, atendimento_id: int, mensagem_id: int, status: str
+) -> None:
+    """Registra o resultado de um disparo Newmo bem-sucedido: grava
+    atendimento_id/mensagem_id (para casar com a resposta do webhook depois),
+    incrementa `tentativas` e marca o timestamp da tentativa correspondente
+    (`tentativa_1`, `tentativa_2` ou `tentativa_3`).
+    """
+    client = get_client()
+    atual = (
+        client.table("tratativas")
+        .select("tentativas")
+        .eq("id", tratativa_id)
+        .execute()
+        .data
+    )
+    if not atual:
+        raise ValueError(f"tratativa {tratativa_id!r} não encontrada")
+
+    tentativas_atual = atual[0]["tentativas"]
+    numero_tentativa = min(tentativas_atual + 1, 3)
+    agora = _agora_utc_iso()
+
+    client.table("tratativas").update(
+        {
+            "atendimento_id": atendimento_id,
+            "mensagem_id": mensagem_id,
+            "status": status,
+            "tentativas": tentativas_atual + 1,
+            f"tentativa_{numero_tentativa}": agora,
+            "ultimo_disparo": agora,
+            "updated_at": agora,
+        }
+    ).eq("id", tratativa_id).execute()
+    _registrar_transicao_status(tratativa_id, status)
+
+
+def marcar_contato_invalido(tratativa_id: str) -> None:
+    """Cod 7 da Newmo (telefone não registrado no WhatsApp) — marca
+    `status_contato`, **sem** tocar `tentativas`/`ultimo_disparo` (decisão
+    já fechada: esse cod não consome tentativa, por isso não reaproveita
+    `atualizar_apos_envio`). Bloqueia `buscar_elegiveis_para_disparo` até
+    "Telefone corrigido" limpar o campo de novo."""
+    client = get_client()
+    client.table("tratativas").update(
+        {"status_contato": STATUS_CONTATO_INVALIDO, "updated_at": _agora_utc_iso()}
+    ).eq("id", tratativa_id).execute()
+
+
+def buscar_por_atendimento_id(atendimento_id: int) -> dict | None:
+    """Usado pelo fluxo de resposta do webhook (a Edge Function grava em
+    `tratativas`; o app só lê o resultado já gravado por `atendimento_id`,
+    que é a chave de correspondência — telefone é só fallback).
+    """
+    client = get_client()
+    linhas = (
+        client.table("tratativas")
+        .select("*")
+        .eq("atendimento_id", atendimento_id)
+        .execute()
+        .data
+    )
+    return linhas[0] if linhas else None
+
+
+# Status em que uma tratativa já saiu do ciclo de mensagens — uma resposta
+# tardia do associado (`retorno_associado`) nesses casos não tem mais lugar
+# pra aparecer em `Tratativas`, então alimenta a aba "Alertas" (Fase F.5).
+_STATUS_RETORNO_TARDIO = [STATUS_AGUARDANDO_LIGACAO, STATUS_ENCAMINHADO_PUMA, STATUS_FINALIZADO]
+
+
+def buscar_candidatas_alertas() -> dict[str, list[dict]]:
+    """As duas fontes da aba "Alertas" (Fase F.5), já separadas por tipo —
+    evita o orchestrator precisar redetectar qual caso é qual a partir dos
+    campos crus:
+
+    - `retorno_tardio`: resposta do associado (`retorno_associado`)
+      chegou depois da tratativa já ter saído de `Tratativas`.
+    - `agendado_sem_data`: associado confirmou agendamento por WhatsApp
+      (`situacao_manual = 'Agendado'`), mas a data combinada ainda não
+      foi preenchida pelo atendente.
+    """
+    client = get_client()
+    retorno_tardio = (
+        client.table("tratativas")
+        .select("*")
+        .not_.is_("retorno_associado", "null")
+        .in_("status", _STATUS_RETORNO_TARDIO)
+        .execute()
+        .data
+    )
+    agendado_sem_data = (
+        client.table("tratativas")
+        .select("*")
+        .eq("situacao_manual", "Agendado")
+        .is_("data_agendada", "null")
+        .execute()
+        .data
+    )
+    return {"retorno_tardio": retorno_tardio, "agendado_sem_data": agendado_sem_data}
+
+
+def marcar_aguardando_ligacao(tratativa_id: str) -> None:
+    """3 tentativas de mensagem sem resposta -> escala para ligação
+    (tentativa única, feita pelo atendente)."""
+    client = get_client()
+    client.table("tratativas").update(
+        {"status": STATUS_AGUARDANDO_LIGACAO, "updated_at": _agora_utc_iso()}
+    ).eq("id", tratativa_id).execute()
+    _registrar_transicao_status(tratativa_id, STATUS_AGUARDANDO_LIGACAO)
+
+
+def registrar_ligacao(tratativa_id: str, dados_ligacao: dict) -> None:
+    """Grava a tentativa de ligação em `ligacoes` (data_contato, retornou,
+    conseguiu_agendar, observacao, registrado_por).
+
+    Se `conseguiu_agendar` for True, finaliza a tratativa diretamente
+    (`status='finalizado'`, com `finalizado_em`). Se for False, o status
+    não é alterado aqui — cabe ao chamador (orchestrator) escalar para
+    `encaminhar_puma` em seguida, conforme a regra "ligação sem sucesso em
+    agendar -> Puma".
+    """
+    client = get_client()
+    payload = dict(dados_ligacao)
+    payload["tratativa_id"] = tratativa_id
+    client.table("ligacoes").insert(payload).execute()
+
+    if dados_ligacao.get("conseguiu_agendar"):
+        agora = _agora_utc_iso()
+        client.table("tratativas").update(
+            {"status": STATUS_FINALIZADO, "updated_at": agora, "finalizado_em": agora}
+        ).eq("id", tratativa_id).execute()
+        _registrar_transicao_status(tratativa_id, STATUS_FINALIZADO)
+
+
+def encaminhar_puma(tratativa_id: str, motivo: str) -> None:
+    """Ligação sem sucesso em agendar -> encaminha automaticamente pro Puma:
+    grava em `puma_encaminhamentos` e marca a tratativa como
+    `status='encaminhado_puma'`.
+    """
+    client = get_client()
+    resultado = client.table("puma_encaminhamentos").insert(
+        {"tratativa_id": tratativa_id, "motivo": motivo}
+    ).execute()
+    puma_id = resultado.data[0]["id"]
+    _registrar_transicao_puma(puma_id, tratativa_id, PUMA_STATUS_AGUARDANDO_ACAO)
+
+    client.table("tratativas").update(
+        {"status": STATUS_ENCAMINHADO_PUMA, "updated_at": _agora_utc_iso()}
+    ).eq("id", tratativa_id).execute()
+    _registrar_transicao_status(tratativa_id, STATUS_ENCAMINHADO_PUMA)
+
+
+def _puma_id_mais_recente(tratativa_id: str) -> str:
+    """Id do encaminhamento MAIS RECENTE da tratativa (`data_
+    encaminhamento` desc) em `puma_encaminhamentos` — compartilhado por
+    `sincronizar_status_puma`/`sincronizar_observacao_puma`. Levanta erro
+    se não achar nenhum (situação impossível no fluxo normal, só chega
+    aqui depois de `encaminhar_puma` já ter rodado)."""
+    client = get_client()
+    encontrados = (
+        client.table("puma_encaminhamentos")
+        .select("id")
+        .eq("tratativa_id", tratativa_id)
+        .order("data_encaminhamento", desc=True)
+        .limit(1)
+        .execute()
+        .data
+    )
+    if not encontrados:
+        raise ValueError(
+            f"nenhum encaminhamento pra Puma encontrado para tratativa {tratativa_id!r}"
+        )
+    return encontrados[0]["id"]
+
+
+def sincronizar_status_puma(tratativa_id: str, status_novo: str) -> None:
+    """Sincroniza de volta pro Supabase o status real de um encaminhamento
+    pra Puma — hoje só existe editado manualmente na coluna "Status" da
+    aba "Encaminhar pra Puma" (por humano, ou por
+    `orchestrator.pipeline._resolver_acao_alerta` via a aba Alertas), sem
+    nenhum caminho de volta pro Supabase até agora (`puma_encaminhamentos.
+    status` nasce com o default `'aguardando_acao'` e nunca era
+    atualizado). Chamado por `etapa_processar_resultado_ligacao`, único
+    ponto que lê essa coluna da planilha.
+    """
+    client = get_client()
+    puma_id = _puma_id_mais_recente(tratativa_id)
+    payload = {"status": status_novo}
+    if status_novo == PUMA_STATUS_CONCLUIDO:
+        payload["concluido_em"] = _agora_utc_iso()
+    client.table("puma_encaminhamentos").update(payload).eq("id", puma_id).execute()
+    _registrar_transicao_puma(puma_id, tratativa_id, status_novo)
+
+
+def sincronizar_observacao_puma(tratativa_id: str, observacao: str) -> None:
+    """Sincroniza de volta pro Supabase o texto que o time da Puma anota
+    na coluna "Observação Puma" da aba "Encaminhar pra Puma" — igual
+    "Status" (`sincronizar_status_puma`), nunca tinha caminho de volta
+    até 2026-08-14. Roda todo ciclo, mesmo com `observacao == ""`
+    (permite apagar uma anotação antiga) — mesma filosofia incondicional
+    do resto dos campos de atendente (`sincronizar_campos_atendente`)."""
+    client = get_client()
+    puma_id = _puma_id_mais_recente(tratativa_id)
+    client.table("puma_encaminhamentos").update({"observacao_puma": observacao}).eq("id", puma_id).execute()
+
+
+def _coagir_valor(valor: str):
+    """`system_parameters.valor` é sempre text no banco — coerção genérica
+    de tipo (bool/int) na leitura; listas (ex: placas_genericas, CSV) ficam a
+    cargo de quem consome o parâmetro, que sabe qual chave é lista.
+    """
+    valor_normalizado = valor.strip()
+    if valor_normalizado.lower() in ("true", "false"):
+        return valor_normalizado.lower() == "true"
+    if valor_normalizado.lstrip("-").isdigit():
+        return int(valor_normalizado)
+    return valor_normalizado
+
+
+def buscar_parametros() -> dict:
+    """system_parameters -> dict {chave: valor} com coerção básica de tipo."""
+    client = get_client()
+    linhas = client.table("system_parameters").select("chave, valor").execute().data
+    return {linha["chave"]: _coagir_valor(linha["valor"]) for linha in linhas}
+
+
+def buscar_rule_templates() -> dict:
+    """rule_templates (ativos) -> dict {codigo_regra: {...}} para consulta
+    direta pelo motor de regras (core.motor_regras)."""
+    client = get_client()
+    linhas = (
+        client.table("rule_templates")
+        .select("codigo_regra, prioridade, template_acao, template_observacao, nivel_urgencia")
+        .eq("ativo", True)
+        .execute()
+        .data
+    )
+    return {linha["codigo_regra"]: linha for linha in linhas}
+
+
+def buscar_bases_ativas() -> list[dict]:
+    """`bases` ativas — usado pra resolver o dropdown "Base" da aba
+    Tratativas pro uuid real (`tratativas.base_id`) e pra montar as
+    variáveis de endereço dos templates de WhatsApp (Fase F.1)."""
+    client = get_client()
+    return client.table("bases").select("id, nome, endereco").eq("ativo", True).execute().data
+
+
+def buscar_pontos_acao_ativos() -> list[dict]:
+    """`pontos_acao` ativos — mesmo uso de `buscar_bases_ativas`, pro
+    dropdown "Ponto de Ação" (`tratativas.ponto_acao_id`)."""
+    client = get_client()
+    return (
+        client.table("pontos_acao")
+        .select("id, nome_local, endereco, data")
+        .eq("ativo", True)
+        .execute()
+        .data
+    )
+
+
+def buscar_situacao_veiculo_sga(chassi: str) -> dict | None:
+    """Último status do SGA conhecido pra esse chassi. Ver
+    `core.motor_regras_instalacao_remocao.atualizar_situacao_sga` pra a
+    lógica pura que decide se `desde` reinicia ou não.
+    """
+    client = get_client()
+    linhas = (
+        client.table("situacao_veiculo_sga")
+        .select("*")
+        .eq("chassi", chassi)
+        .execute()
+        .data
+    )
+    return linhas[0] if linhas else None
+
+
+def upsert_situacao_veiculo_sga(dados: dict) -> None:
+    """Insere ou atualiza `situacao_veiculo_sga` pra um chassi — chave
+    primária é `chassi`, não `chave_unica` como em `upsert_tratativa`.
+    Espera o dict retornado por `core.motor_regras_instalacao_remocao.
+    atualizar_situacao_sga`; `desde`/`atualizado_em` podem vir como
+    `datetime` (o core não conhece formato de Supabase, converte-se
+    aqui pra ISO).
+    """
+    if "chassi" not in dados:
+        raise ValueError("dados precisa conter 'chassi' para upsert_situacao_veiculo_sga")
+
+    payload = dict(dados)
+    for campo in ("desde", "atualizado_em"):
+        if isinstance(payload.get(campo), datetime):
+            payload[campo] = payload[campo].isoformat()
+
+    client = get_client()
+    if buscar_situacao_veiculo_sga(payload["chassi"]):
+        client.table("situacao_veiculo_sga").update(payload).eq("chassi", payload["chassi"]).execute()
+    else:
+        client.table("situacao_veiculo_sga").insert(payload).execute()
+
+
+def registrar_log_execucao(
+    execucao_id: str,
+    etapa_id: str,
+    maquina: str,
+    iniciado_em: datetime,
+    finalizado_em: datetime,
+    sucesso: bool,
+    motivo_parada: str | None,
+    mensagem: str,
+) -> None:
+    """1 linha em `log_execucoes` por etapa executada — `duracao_ms` é
+    derivado aqui (não confiar no chamador pra fazer a conta). Chamado por
+    `orchestrator.catalogo_etapas.executar_etapas_com_contexto`/
+    `continuar_apos_reconexao`, sempre envolvido em try/except no
+    chamador (uma falha de rede ao registrar telemetria não pode derrubar
+    a etapa real nem vazar a trava de execução)."""
+    duracao_ms = int((finalizado_em - iniciado_em).total_seconds() * 1000)
+    get_client().table("log_execucoes").insert(
+        {
+            "execucao_id": execucao_id,
+            "etapa_id": etapa_id,
+            "maquina": maquina,
+            "iniciado_em": iniciado_em.isoformat(),
+            "finalizado_em": finalizado_em.isoformat(),
+            "duracao_ms": duracao_ms,
+            "sucesso": sucesso,
+            "motivo_parada": motivo_parada,
+            "mensagem": mensagem,
+        }
+    ).execute()
+
+
+def buscar_execucao_lock_atual() -> dict:
+    """Estado atual da trava única (`execucao_lock`, linha seed
+    `id='pipeline_diario'`) — usado pelo watchdog pra decidir se a
+    execução está travada há mais tempo que o normal (`em_execucao`,
+    `iniciado_em`)."""
+    return (
+        get_client()
+        .table("execucao_lock")
+        .select("em_execucao, maquina, iniciado_em")
+        .eq("id", _ID_EXECUCAO_LOCK)
+        .single()
+        .execute()
+        .data
+    )
+
+
+def buscar_ultimas_execucoes(limite_por_etapa: int = 5) -> dict[str, list[dict]]:
+    """Últimas execuções de `log_execucoes`, agrupadas por `etapa_id`
+    (mais recente primeiro) — alimenta o watchdog (etapa que falhou,
+    etapa mais lenta que a média histórica) e o diagnóstico de eficiência
+    do SGA/Track N'Me. PostgREST não faz "top N por grupo" num único
+    round-trip; busca um limite total generoso ordenado por
+    `etapa_id, iniciado_em desc` e agrupa em Python."""
+    client = get_client()
+    linhas = (
+        client.table("log_execucoes")
+        .select("etapa_id, iniciado_em, finalizado_em, duracao_ms, sucesso, motivo_parada, mensagem")
+        .order("etapa_id")
+        .order("iniciado_em", desc=True)
+        .limit(2000)
+        .execute()
+        .data
+    )
+    agrupado: dict[str, list[dict]] = {}
+    for linha in linhas:
+        lista = agrupado.setdefault(linha["etapa_id"], [])
+        if len(lista) < limite_por_etapa:
+            lista.append(linha)
+    return agrupado
+
+
+_ID_EXECUCAO_LOCK = "pipeline_diario"
+# Segurança: acima disso, considera a trava travada por engano (ex: a máquina
+# que travou caiu no meio da execução) e libera sozinha, sem exigir
+# intervenção manual. Valor de partida — ajustar se a duração real do
+# pipeline completo mostrar que 2h é curto/longo demais.
+TTL_EXECUCAO_LOCK_MINUTOS = 120
+
+
+def adquirir_execucao_lock(maquina: str, ttl_minutos: int = TTL_EXECUCAO_LOCK_MINUTOS) -> bool:
+    """Trava a execução única do pipeline diário (linha `id='pipeline_diario'`
+    em `execucao_lock`, Fase 2 — evita 2 máquinas processando a mesma fila do
+    dia ao mesmo tempo, não importa qual disparou). Chamar antes de
+    "Executar tudo"/"a partir daqui" no Painel Operador; sempre parear com
+    `liberar_execucao_lock` num `finally`.
+
+    Se já houver uma execução marcada mas `iniciado_em` for mais antigo que
+    `ttl_minutos`, trata como travada por engano e adquire mesmo assim.
+
+    Retorna True se conseguiu travar (pode seguir), False se outra máquina
+    já está executando de verdade agora.
+    """
+    client = get_client()
+    linha = (
+        client.table("execucao_lock")
+        .select("em_execucao, iniciado_em")
+        .eq("id", _ID_EXECUCAO_LOCK)
+        .single()
+        .execute()
+        .data
+    )
+
+    if linha["em_execucao"] and linha["iniciado_em"]:
+        iniciado_em = datetime.fromisoformat(linha["iniciado_em"])
+        if datetime.now(timezone.utc) - iniciado_em < timedelta(minutes=ttl_minutos):
+            return False
+
+    client.table("execucao_lock").update(
+        {
+            "em_execucao": True,
+            "maquina": maquina,
+            "iniciado_em": _agora_utc_iso(),
+        }
+    ).eq("id", _ID_EXECUCAO_LOCK).execute()
+    return True
+
+
+def liberar_execucao_lock() -> None:
+    """Libera a trava ao final da execução — sempre num `finally`, pra não
+    deixar travada pra sempre se o pipeline quebrar no meio."""
+    client = get_client()
+    client.table("execucao_lock").update({"em_execucao": False}).eq(
+        "id", _ID_EXECUCAO_LOCK
+    ).execute()
+
+
+_STATUS_FORA_DE_PENDENCIA = [STATUS_FINALIZADO, STATUS_ENCAMINHADO_PUMA]
+
+
+def contar_pendencias_por_origem() -> dict:
+    """Contagem "agora" de tratativas ainda em aberto (fora do ciclo já
+    concluído), agrupada por origem — alimenta os 3 cards de resumo do
+    Painel Operador (tela "Operação", Fase 4)."""
+    client = get_client()
+    linhas = (
+        client.table("tratativas")
+        .select("origem")
+        .not_.in_("status", _STATUS_FORA_DE_PENDENCIA)
+        .execute()
+        .data
+    )
+    contagem = {ORIGEM_MANUTENCAO: 0, ORIGEM_INSTALACAO: 0, ORIGEM_REMOCAO: 0}
+    for linha in linhas:
+        if linha.get("origem") in contagem:
+            contagem[linha["origem"]] += 1
+    return contagem
+
+
+_COLUNAS_DASHBOARD_OPERADOR = (
+    "chave_unica, origem, identificador, chassi, cliente, telefone, codigo_regra, status, "
+    "atendimento, status_contato, situacao_manual, situacao_manual_definida_em, "
+    "discrepancia_revisada, tentativa_1, tentativa_2, tentativa_3, created_at"
+)
+
+
+def buscar_tratativas_abertas_para_dashboard_operador() -> list[dict]:
+    """1 busca só, reaproveitada por todos os widgets A-F do "Painel de
+    apoio" do Operador (`orchestrator.dashboards_operador.
+    montar_dashboards_operador`) — evita um round-trip por widget."""
+    client = get_client()
+    return (
+        client.table("tratativas")
+        .select(_COLUNAS_DASHBOARD_OPERADOR)
+        .not_.in_("status", _STATUS_FORA_DE_PENDENCIA)
+        .execute()
+        .data
+    )
