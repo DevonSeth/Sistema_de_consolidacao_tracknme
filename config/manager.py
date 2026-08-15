@@ -88,6 +88,12 @@ class ConfigGmail:
     email_remetente: str
 
 
+@dataclass
+class ConfigProvisionamento:
+    base_url: str
+    chave_maquina: str
+
+
 # Campos obrigatórios por seção (usado para validar `salvar_config`).
 CAMPOS_OBRIGATORIOS = {
     "tracknme": ["usuario", "senha"],
@@ -99,6 +105,10 @@ CAMPOS_OBRIGATORIOS = {
         "planilha_operacional_id",
     ],
     "gmail": ["refresh_token", "email_remetente"],
+    # "versoes_conhecidas" (dict, não-secreto) também mora aqui — não é
+    # obrigatório porque uma máquina pode ter sido provisionada antes de
+    # qualquer rotação existir; ver integrations/provisionamento_client.py.
+    "provisionamento": ["base_url", "chave_maquina"],
 }
 
 # Campos que NUNCA vão para o arquivo local em texto puro — só keyring.
@@ -107,6 +117,7 @@ CAMPOS_SECRETOS = {
     "newmo": ["token"],
     "supabase": ["service_role_key"],
     "gmail": ["refresh_token"],
+    "provisionamento": ["chave_maquina"],
 }
 
 SECOES_CONHECIDAS = list(CAMPOS_OBRIGATORIOS.keys())
