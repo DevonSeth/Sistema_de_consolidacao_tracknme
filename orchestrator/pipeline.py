@@ -104,9 +104,12 @@ def _diretorio_downloads() -> Path:
     """Mesma convenção de `integrations.tracknme_bot._diretorio_downloads`
     (duplicada de propósito — já é o mesmo padrão usado por
     `config.manager._diretorio_config`): pasta `downloads/` ao lado do
-    código-fonte em dev, ao lado do .exe quando empacotado."""
+    código-fonte em dev; quando empacotado, em `%LOCALAPPDATA%\\
+    ConsolidacaoTrackNMe\\downloads` (`config.manager._diretorio_dados_
+    local`) — fixo por máquina, independente de qual pasta de versão do
+    `.exe` está rodando (Fase 1, Launcher)."""
     if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
+        base = manager._diretorio_dados_local()
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "downloads"

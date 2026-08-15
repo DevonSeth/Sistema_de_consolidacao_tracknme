@@ -41,6 +41,7 @@ empacotado via PyInstaller.
 """
 
 import json
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,16 +124,37 @@ CAMPOS_SECRETOS = {
 SECOES_CONHECIDAS = list(CAMPOS_OBRIGATORIOS.keys())
 
 
+NOME_PASTA_DADOS_LOCAL = "ConsolidacaoTrackNMe"
+
+
+def _diretorio_dados_local() -> Path:
+    """Pasta fixa de dados do app (config/downloads), independente de qual
+    pasta de versão do `.exe` está rodando — só usada quando empacotado
+    (`sys.frozen`).
+
+    Achado ao empacotar pela 1ª vez (Fase 1, passo 1.3): resolver esses
+    dados ao lado do `.exe` (como antes) funciona pra 1 exe fixo, mas
+    quebra o esquema do Launcher de "cada versão nova vive na sua própria
+    pasta `versoes/<versao>/`" — a máquina "esqueceria" a credencial
+    provisionada a cada atualização. `%LOCALAPPDATA%` é o local
+    convencional do Windows pra dado de app por máquina/usuário, que não
+    deveria sumir quando o `.exe` é trocado de lugar.
+    """
+    return Path(os.environ["LOCALAPPDATA"]) / NOME_PASTA_DADOS_LOCAL
+
+
 def _diretorio_config() -> Path:
     """Pasta `config/` a usar, tanto rodando a partir do código-fonte quanto
     a partir do executável empacotado.
 
     Dev:         <raiz-do-projeto>/config/
-    Empacotado:  <pasta-do-.exe>/config/  (nunca a pasta temporária do
-                 PyInstaller, que é apagada a cada execução)
+    Empacotado:  %LOCALAPPDATA%/ConsolidacaoTrackNMe/config/ — nunca ao
+                 lado do `.exe` (que muda de pasta a cada versão baixada
+                 pelo Launcher) nem a pasta temporária do PyInstaller
+                 (que é apagada a cada execução).
     """
     if getattr(sys, "frozen", False):
-        base = Path(sys.executable).resolve().parent
+        base = _diretorio_dados_local()
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "config"

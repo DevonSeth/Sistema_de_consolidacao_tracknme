@@ -20,6 +20,11 @@ Cada passo abaixo diz **quem faz**: 🧑 você (ação que só você pode
 tomar — conta pessoal, botão de UI externa) ou 🤖 eu (código/config que
 eu escrevo e você aprova).
 
+**URL de produção** (confirmada com o usuário 2026-08-15, depois de eu
+não achar isso registrado em lugar nenhum na 1ª tentativa de smoke test
+pós-Fase 0):
+`https://sistema-de-consolidacao-tracknme.vercel.app`
+
 ---
 
 ## Achado importante antes de começar: bug no `.gitignore` da raiz
@@ -137,7 +142,7 @@ no seu editor pra colar na Vercel, sem me colar aqui.
 
 A Vercel dispara o deploy sozinha assim que o projeto é criado (e depois,
 automaticamente, a cada `git push` pra `main`). Quando terminar:
-1. Abra a URL `https://<nome-do-projeto>.vercel.app/admin/configuracao`.
+1. Abra a URL `https://sistema-de-consolidacao-tracknme.vercel.app/admin/configuracao`.
 2. Confirme que a tela carrega e que "Testar conexão" funciona pra
    Supabase/Newmo/Google Sheets (mesmos botões que já funcionam local).
 3. Confirme `/dashboard` carrega os KPIs reais.
@@ -250,14 +255,64 @@ Lê a linha (única, sempre a mais recente) de `launcher_versao_atual` e
 devolve `{ versao, url_download, sha256 }` — já é exatamente o formato
 que o comentário no stub já documenta.
 
-### 1.3 🤖 `.spec` do PyInstaller pro `PainelOperador.exe`
+### 1.3 🤖 `.spec` do PyInstaller pro `PainelOperador.exe` — CONCLUÍDO 2026-08-15
 
 Empacota `main.py` + `ui/` num único `.exe`, com os navegadores do
-Playwright **embutidos** (evita `playwright install` em cada máquina —
-decisão já fechada no plano de arquitetura). Vou desenhar isso com
-`EnterPlanMode` quando chegarmos aqui (primeira vez usando PyInstaller
-neste projeto — regra de sempre: testar num artefato descartável antes
-de qualquer coisa "oficial").
+Playwright **embutidos** (evita `playwright install` em cada máquina).
+`PainelOperador.spec` (raiz do projeto), `--onedir` (não `--onefile` —
+reextrairia o Chromium embutido a cada abertura, mesmo problema que a
+pasta temp do PyInstaller já causava pra outros recursos).
+
+**3 riscos concretos de empacotar pela 1ª vez, todos resolvidos**:
+1. `keyring`/`pywebview` escolhem backend por import dinâmico — sem
+   `collect_all`/`hiddenimports` explícito, o `.exe` cai num backend
+   errado em silêncio. Resolvido com `collect_all("pywebview")`,
+   `collect_all("playwright")` e `hiddenimports=["keyring.backends.
+   Windows"]`.
+2. **Achado novo, não previsto neste guia**: `config/manager.py::
+   _diretorio_config()`/`_diretorio_downloads()` (`orchestrator/
+   pipeline.py` e `integrations/tracknme_bot.py`) resolviam tudo ao
+   lado do `.exe` — funcionava pra 1 exe fixo, mas quebraria o esquema
+   do Launcher (1.4) de "cada versão nova em `versoes/<versao>/`": a
+   máquina "esqueceria" a credencial provisionada a cada atualização.
+   Corrigido: essas 2 funções agora resolvem pra `%LOCALAPPDATA%\
+   ConsolidacaoTrackNMe\` (fixo por máquina) quando `sys.frozen` — só
+   `ui/app.py::_diretorio_web()` continua ao lado do `.exe` (os assets
+   de UI DEVEM vir com a versão). Em dev, nada muda.
+3. **Achado ao vivo, testando o artefato descartável**: `chromium.
+   launch(headless=True)` (auto-login) e `launch(headless=False)`
+   (fallback manual pro humano resolver reCAPTCHA) — ambos usados em
+   `tracknme_bot.py` — resolvem pra **2 binários diferentes**
+   (`chromium-<rev>/chrome-win64/chrome.exe` vs `chromium_headless_
+   shell-<rev>/chrome-headless-shell-win64/chrome-headless-shell.exe`).
+   `playwright.chromium.executable_path` só reporta o 1º — checar só
+   ele engana (a 1ª versão do `.spec` fazia isso, e o headless quebrava
+   em silêncio). O `.spec` final bundla os 2 (`ms-playwright/chromium*`
+   descoberto dinamicamente, não hardcoded).
+- `main.py` seta `PLAYWRIGHT_BROWSERS_PATH` pro `ms-playwright/` ao
+  lado do `.exe` antes de qualquer import de `playwright` rodar (só
+  quando `sys.frozen`).
+- Novo `main.py --testar-playwright`: diagnóstico standalone (abre e
+  fecha o Chromium embutido, sem UI) — usado pra validar isso ao vivo,
+  fica como ferramenta permanente de suporte/depuração.
+- **Achado de ambiente, não de código**: o 1º teste (numa pasta de
+  scratch bem aninhada, ~300 caracteres de caminho) falhou com
+  `ENOENT` no `chrome-headless-shell.exe` — não era bug, o caminho
+  excedia o `MAX_PATH` clássico do Windows (260). Testando de novo num
+  caminho curto (`C:\pinstest\`), tudo funcionou. Implicação pro
+  Launcher (1.4): escolher uma pasta de instalação com caminho curto
+  (`%LOCALAPPDATA%\ConsolidacaoTrackNMe\versoes\<versao>\` fica em
+  ~180 caracteres — folga confortável).
+- 5 testes novos (`tests/test_config_manager.py` — ramo `frozen` das 3
+  funções de diretório; `tests/test_main.py` — a flag `--testar-
+  playwright`). 619 testes Python.
+- Validado ao vivo: `.exe` rodando de pasta descartável fora do
+  projeto/`.venv`, janela abre, `config/` aparece em `%LOCALAPPDATA%\
+  ConsolidacaoTrackNMe\` (não ao lado do `.exe`), config persiste entre
+  2 cópias diferentes do `.exe` (prova o objetivo da correção #2),
+  Chromium embutido abre com sucesso, sem processo órfão ao fechar.
+  `build/`/`dist/` adicionados ao `.gitignore` (nunca versionar — são
+  gerados localmente, centenas de MB).
 
 ### 1.4 🤖 O `Launcher.exe` (app separado, pequeno)
 
@@ -328,7 +383,7 @@ confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
 | 0.10 | Validar com token de teste descartável | 🧑🤖 ✅ |
 | 1.1 | SQL `launcher_versao_atual` | 🧑 |
 | 1.2 | Implementar `/versao-atual` de verdade | 🤖 |
-| 1.3 | `.spec` PyInstaller do Painel Operador | 🤖 |
+| 1.3 | `.spec` PyInstaller do Painel Operador | 🤖 ✅ |
 | 1.4 | `Launcher.exe` | 🤖 |
 | 1.5 | Testar build local | 🧑🤖 |
 | 1.6 | Publicar release no GitHub | 🧑 |
