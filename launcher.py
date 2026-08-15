@@ -275,7 +275,10 @@ def main(argv=None):
         _mostrar_erro(f"Falha ao baixar a atualização do Painel Operador:\n{e}")
         return
 
-    abrir_painel(caminho_exe)
+    try:
+        abrir_painel(caminho_exe)
+    except OSError as e:
+        _mostrar_erro(f"Não foi possível abrir o Painel Operador:\n{e}")
 
 
 if __name__ == "__main__":
