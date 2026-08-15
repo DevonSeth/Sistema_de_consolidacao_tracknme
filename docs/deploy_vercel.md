@@ -241,19 +241,23 @@ de teste + a `maquinas_operador` criada no meio do teste.
 Depende da Fase 0 estar no ar (o Launcher chama `GET /api/operador/
 versao-atual`, que já existe como rota mas ainda em stub).
 
-### 1.1 🧑 Rodar o SQL da tabela `launcher_versao_atual`
+### 1.1 🧑 Rodar o SQL da tabela `launcher_versao_atual` — CONCLUÍDO 2026-08-15
 
-Eu preparo o script (`_handoff/sql_fase1_launcher_versao.sql`), você
-roda no SQL Editor do Supabase (DDL não passa por `service_role_key`,
-mesma regra de sempre). Estrutura: `versao` (text), `url_download`
-(text — aponta pro asset do GitHub Release), `sha256` (text),
-`publicado_em` (timestamp).
+Script `_handoff/sql_fase1_launcher_versao.sql` rodado no SQL Editor do
+Supabase (DDL não passa por `service_role_key`, mesma regra de sempre).
+Estrutura: `versao` (text), `url_download` (text — aponta pro asset do
+GitHub Release), `sha256` (text), `publicado_em` (timestamp). Tabela
+confirmada existindo via `SELECT` read-only.
 
-### 1.2 🤖 Implementar `GET /api/operador/versao-atual` de verdade
+### 1.2 🤖 Implementar `GET /api/operador/versao-atual` de verdade — CONCLUÍDO 2026-08-15
 
 Lê a linha (única, sempre a mais recente) de `launcher_versao_atual` e
-devolve `{ versao, url_download, sha256 }` — já é exatamente o formato
-que o comentário no stub já documenta.
+devolve `{ versao, url_download, sha256 }`. Já estava implementado no
+código (não era mais stub), mas nunca tinha sido validado ao vivo
+porque a tabela do passo 1.1 não existia — achado no início desta
+sessão. Validado com linha de teste descartável (`INSERT` direto via
+`service_role_key` → `npm run dev` → `curl` na rota real → 200 com o
+formato exato → `DELETE` da linha de teste → confirmado vazio de novo).
 
 ### 1.3 🤖 `.spec` do PyInstaller pro `PainelOperador.exe` — CONCLUÍDO 2026-08-15
 
@@ -314,18 +318,89 @@ pasta temp do PyInstaller já causava pra outros recursos).
   `build/`/`dist/` adicionados ao `.gitignore` (nunca versionar — são
   gerados localmente, centenas de MB).
 
-### 1.4 🤖 O `Launcher.exe` (app separado, pequeno)
+### 1.4 🤖 O `Launcher.exe` (app separado, pequeno) — CONSTRUÍDO 2026-08-15
 
 Programinha à parte, com o mínimo de dependências (não usa Playwright
-nem pywebview) — na abertura:
-1. Chama `GET /api/operador/versao-atual`.
-2. Se a pasta local `versoes/<versao>/` já existe, só executa o
-   `PainelOperador.exe` de dentro dela.
-3. Se não existe: baixa o `.zip` de `url_download` (GitHub Releases),
-   confere o `sha256`, extrai pra `versoes/<versao>/`, executa de lá.
+nem pywebview) — `launcher.py` (raiz do projeto), na abertura:
+1. Registra (idempotente) o protocolo `tracknme-operador://` no Windows.
+2. Chama `GET /api/operador/versao-atual`.
+3. Se a pasta local `versoes/<versao>/` já existe, só executa o
+   `PainelOperador.exe` de dentro dela (fast path, sem UI nenhuma).
+4. Se não existe: baixa o `.zip` via `GET /api/operador/download/
+   {versao}` (ver abaixo — não `url_download` direto), confere o
+   `sha256`, extrai pra uma pasta de staging e promove atomicamente pra
+   `versoes/<versao>/`, executa de lá.
 
 Isso nunca sobrescreve um `.exe` em execução (decisão já fechada —
-frágil no Windows) — cada versão vive na sua própria pasta.
+frágil no Windows) — cada versão vive na sua própria pasta. Concorrência
+(2 Launchers baixando a mesma versão nova ao mesmo tempo): o perdedor da
+corrida de `os.replace` trata a falha como sucesso, já que a versão já
+está no lugar certo.
+
+**Achado de arquitetura nesta sessão, que mudou o desenho original**: o
+repositório GitHub é privado — a URL de download de um asset de release
+não é acessível sem autenticação, e o Launcher não pode carregar nenhum
+token do GitHub embutido (extraível do binário). Decisão fechada com o
+usuário (`AskUserQuestion`): **redirect assinado via Vercel**. Rota nova
+`GET /api/operador/download/[versao]` (`webapp/src/app/api/operador/
+download/[versao]/route.ts` — primeira rota dinâmica do projeto,
+`params: Promise<{versao: string}>`, padrão do Next.js 16.3.0) busca o
+`asset_id` da versão em `launcher_versao_atual` (coluna nova, ver
+abaixo), chama `GET https://api.github.com/repos/{owner}/{repo}/
+releases/assets/{asset_id}` com `Accept: application/octet-stream` e um
+token que mora só na Vercel (`GITHUB_RELEASE_TOKEN`, env var *Sensitive*
+nova, PAT fine-grained só com leitura de conteúdo neste repositório —
+mesmo padrão de `SUPABASE_SERVICE_ROLE_KEY`), sem seguir o redirect
+(`redirect: "manual"`) — a API do GitHub responde com um `302` pra uma
+URL assinada e temporária do storage. A rota repassa esse `302` pro
+Launcher seguir direto: os bytes do `.zip` (pode ter centenas de MB, o
+onedir do Painel inclui o Chromium embutido) nunca passam pela function
+da Vercel, só a URL passa. Preserva a decisão já fechada em 2026-08-14
+de usar GitHub Releases (não Vercel Blob, não Supabase Storage).
+
+**Coluna nova em `launcher_versao_atual`**: `asset_id bigint not null`
+(`_handoff/sql_fase1_launcher_versao_asset_id.sql`) — o `url_download`
+já existente é só a URL pública de navegador (inútil pra chamar a API
+do GitHub num repo privado), continua existindo só como referência
+humana.
+
+**Convenção de conteúdo do `.zip`** (relevante pro passo 1.6, fechada
+agora pra não virar bug descoberto tarde): os arquivos do onedir do
+`PainelOperador` (`dist/PainelOperador/*`) devem ficar **direto na raiz
+do zip** — zipar o *conteúdo* da pasta, não a pasta em si. Senão o
+executável final cai em `versoes/<versao>/PainelOperador/
+PainelOperador.exe`, quebrando a resolução de caminho do Launcher e
+alongando o caminho (relevante pro `MAX_PATH`, achado do passo 1.3).
+
+**Decisões de design**: entrypoint `launcher.py` (raiz, irmão de
+`main.py`, mesma convenção). `Launcher.spec` é `--onefile` (ao contrário
+do `PainelOperador.spec`, que é `--onedir`) — sem Playwright/pywebview/
+Chromium embutido, a única dependência "pesada" herdada é `keyring`
+(via `config.manager`), cuja reextração pro `%TEMP%` é da ordem de
+poucos MB, sub-segundo. UI mínima em `tkinter` (stdlib, zero dependência
+nova) — só aparece quando precisa baixar uma versão nova (barra de
+progresso simples); fast path (versão já local) abre sem nenhuma janela.
+`BASE_URL_PRODUCAO` é uma constante embutida no `launcher.py` (o Windows
+invoca o protocolo só com a URI, sem como passar `--base-url`; e não dá
+pra ler de `config.manager.carregar_config()` porque isso só existe
+*depois* que o Painel já foi provisionado — ordem inversa). `--base-url`
+continua existindo como override manual pro passo 1.5.
+
+**Testes**: `tests/test_launcher.py`, 17 casos novos (636 testes
+Python no total), 100% mockado (`httpx.stream`/`httpx.get` via
+`monkeypatch`, mesmo padrão de `tests/test_provisionamento_client.py`;
+`winreg` mockado por um fake com dict em memória — roda nativamente no
+Windows do projeto). A rota `/download/[versao]` não tem teste
+automatizado (confirmado que o `webapp/` não tem framework de teste
+configurado nenhuma outra rota tampouco) — validação é manual (`npm run
+dev` + `curl -i`), passo 1.5.
+
+**Ainda não validado ao vivo** (fica pro passo 1.5, joint com o
+usuário): build real do `.exe` (`pyinstaller Launcher.spec`), protocolo
+registrado de fato no Windows, download+extração+execução de uma versão
+real publicada. A rota de download também só pode ser testada de
+verdade depois que `GITHUB_RELEASE_TOKEN` estiver configurado na Vercel
+e existir uma release real com `asset_id` conhecido (passo 1.6/1.7).
 
 **Registro do protocolo customizado** (2026-08-14, chat #16): o Painel
 Admin (`webapp/src/app/admin/layout.tsx`) já tem um link `Abrir Painel
@@ -352,8 +427,11 @@ Depois do build validado localmente: criar uma release no GitHub (UI ou
 
 ### 1.7 🤖 Atualizar `launcher_versao_atual` com a release real
 
-Script de 1x (ou você mesmo, é só um `UPDATE`) gravando `versao`/
-`url_download`/`sha256` da release publicada no passo 1.6.
+Script de 1x (ou você mesmo, é só um `INSERT`) gravando `versao`/
+`url_download`/`sha256`/**`asset_id`** (novo, passo 1.4 — o ID numérico
+do asset na release, necessário pra rota `GET /api/operador/
+download/[versao]` chamar a API do GitHub) da release publicada no
+passo 1.6.
 
 ### 1.8 🧑🤖 Validação: "versão 2" fake (juntos)
 
@@ -381,11 +459,13 @@ confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
 | 0.8 | Implementar `/provisionar` e `/credenciais/versao` | 🤖 ✅ |
 | 0.9 | `main.py --provisionar` + client Python | 🤖 ✅ |
 | 0.10 | Validar com token de teste descartável | 🧑🤖 ✅ |
-| 1.1 | SQL `launcher_versao_atual` | 🧑 |
-| 1.2 | Implementar `/versao-atual` de verdade | 🤖 |
+| 1.1 | SQL `launcher_versao_atual` | 🧑 ✅ |
+| 1.2 | Implementar `/versao-atual` de verdade | 🤖 ✅ |
 | 1.3 | `.spec` PyInstaller do Painel Operador | 🤖 ✅ |
-| 1.4 | `Launcher.exe` | 🤖 |
+| 1.4 | `launcher.py` + `Launcher.spec` + rota `/download/[versao]` + `asset_id` | 🤖 ✅ (código+testes; sem validação ao vivo) |
+| 1.4b | Rodar SQL `asset_id` | 🧑 ✅ |
+| 1.4c | Configurar `GITHUB_RELEASE_TOKEN` na Vercel | 🧑 ✅ |
 | 1.5 | Testar build local | 🧑🤖 |
 | 1.6 | Publicar release no GitHub | 🧑 |
-| 1.7 | Atualizar tabela com a release real | 🤖 |
+| 1.7 | Atualizar tabela com a release real (incl. `asset_id`) | 🤖 |
 | 1.8 | Validar "v2" fake | 🧑🤖 |

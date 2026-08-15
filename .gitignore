@@ -16,9 +16,17 @@ config/*.enc
 .env
 supabase/.temp/
 
-# Artefatos de build do PyInstaller (Fase 1, passo 1.3) — gerados
-# localmente por `pyinstaller PainelOperador.spec`, nunca versionados
-# (centenas de MB, inclui o Chromium do Playwright embutido).
+# Artefatos de build do PyInstaller (Fase 1, passos 1.3/1.4) — gerados
+# localmente por `pyinstaller PainelOperador.spec`/`pyinstaller
+# Launcher.spec`, nunca versionados (centenas de MB, inclui o Chromium
+# do Playwright embutido).
 /build/
 /dist/
+
+# Pasta de versões baixadas pelo Launcher (Fase 1, passo 1.4) — defensivo:
+# `config.manager._diretorio_dados_local()` sempre resolve pra
+# %LOCALAPPDATA%, nunca deveria aparecer dentro do repositório de fato,
+# mas protege contra um teste manual acidental com LOCALAPPDATA apontado
+# pro projeto.
+/versoes/
 
