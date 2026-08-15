@@ -107,3 +107,44 @@ def test_testar_conexao_tracknme_propaga_falha(monkeypatch):
     monkeypatch.setattr(tracknme_bot, "testar_login", _testar_login_fake)
 
     assert manager.testar_conexao("tracknme") is False
+
+
+def test_diretorio_dados_local_usa_localappdata(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    assert manager._diretorio_dados_local() == tmp_path / manager.NOME_PASTA_DADOS_LOCAL
+
+
+def test_diretorio_config_em_dev_ignora_localappdata(monkeypatch, tmp_path):
+    """Achado ao empacotar pela 1ª vez (Fase 1, passo 1.3): só o ramo
+    `frozen` deve mudar pra %LOCALAPPDATA%; em dev o comportamento de
+    sempre (relativo ao código-fonte) não pode mudar."""
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(manager.sys, "frozen", False, raising=False)
+
+    assert str(tmp_path) not in str(manager._diretorio_config())
+
+
+def test_diretorio_config_quando_frozen_usa_localappdata(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(manager.sys, "frozen", True, raising=False)
+
+    assert manager._diretorio_config() == tmp_path / manager.NOME_PASTA_DADOS_LOCAL / "config"
+
+
+def test_diretorio_downloads_pipeline_quando_frozen_usa_localappdata(monkeypatch, tmp_path):
+    from orchestrator import pipeline
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(pipeline.sys, "frozen", True, raising=False)
+
+    assert pipeline._diretorio_downloads() == tmp_path / manager.NOME_PASTA_DADOS_LOCAL / "downloads"
+
+
+def test_diretorio_downloads_tracknme_bot_quando_frozen_usa_localappdata(monkeypatch, tmp_path):
+    from integrations import tracknme_bot
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(tracknme_bot.sys, "frozen", True, raising=False)
+
+    assert tracknme_bot._diretorio_downloads() == tmp_path / manager.NOME_PASTA_DADOS_LOCAL / "downloads"

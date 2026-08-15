@@ -48,3 +48,17 @@ def test_main_provisionar_chama_o_client_e_nao_abre_interface(monkeypatch):
     main.main(argv=["--provisionar", "token-x", "--base-url", "http://localhost:3000"])
 
     assert chamadas == [("http://localhost:3000", "token-x")]
+
+
+def test_main_testar_playwright_nao_abre_interface_nem_carrega_config(monkeypatch):
+    chamadas = []
+
+    monkeypatch.setattr("main._testar_playwright", lambda: chamadas.append("testar_playwright"))
+    monkeypatch.setattr("config.manager.carregar_config", lambda: chamadas.append("carregar_config") or {})
+    monkeypatch.setattr("main.iniciar_interface", lambda: chamadas.append("iniciar_interface"))
+
+    import main
+
+    main.main(argv=["--testar-playwright"])
+
+    assert chamadas == ["testar_playwright"]
