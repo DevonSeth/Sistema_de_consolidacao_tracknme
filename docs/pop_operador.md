@@ -7,6 +7,15 @@ qualquer pessoa que nunca usou o sistema consegue operar como atendente
 só lendo este documento — nenhum passo fica implícito, mesmo o que
 pareça óbvio pra quem já conhece o projeto.
 
+**Versão resumida dentro do próprio app** (2026-08-15): o Painel
+Operador ganhou uma aba "Manual" (`ui/web/index.html`, seção
+`#manual-planilha` e vizinhas) com uma versão curada deste conteúdo —
+visão geral, rotina diária, como alimentar cada aba e avisos
+importantes — pra consulta rápida sem precisar abrir este arquivo.
+Este documento continua sendo a fonte completa/oficial; se o
+comportamento do sistema mudar, atualize aqui primeiro e depois
+reflita a mudança na aba Manual.
+
 ## 1. Visão geral do papel
 
 O atendente cuida do **contato com o associado** depois que o sistema já
