@@ -413,11 +413,19 @@ princípio usado por launchers tipo Riot/Steam/Discord (`riot://`,
 `steam://`). Sem isso, o botão do Admin não abre nada — comportamento
 esperado até este passo ser implementado.
 
-### 1.5 🧑🤖 Testar o build localmente (juntos)
+### 1.5 🧑🤖 Testar o build localmente (juntos) — CONCLUÍDO 2026-08-15
 
-Rodar o `Launcher.exe` + `PainelOperador.exe` gerados nesta própria
-máquina antes de publicar qualquer coisa — confirma que o executável
-funciona fora do `.venv` (dependências realmente embutidas).
+Validado em 3 partes: (1) `pyinstaller Launcher.spec` gerou o `.exe`
+sem erro; (2) rodado de uma pasta descartável fora do projeto —
+protocolo `tracknme-operador://` registrado corretamente no Windows,
+sem crash quando não há versão publicada; (3) fast path (versão já
+local) e **download real** contra uma release de teste descartável no
+GitHub (`teste-1.5-descartavel`) — a esteira completa (rota de
+redirect → GitHub API → download → SHA256 → extração → promoção)
+funcionou ponta a ponta contra produção. Achado ao vivo corrigido na
+hora: `abrir_painel()` não tratava `OSError` de um executável inválido
+— corrigido (commit `9c755b2`). 637 testes Python. Detalhe completo em
+`_handoff/HANDOFF.md`, seção "Fase 1, passo 1.5".
 
 ### 1.6 🧑 Publicar a 1ª release no GitHub Releases
 
@@ -465,7 +473,7 @@ confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
 | 1.4 | `launcher.py` + `Launcher.spec` + rota `/download/[versao]` + `asset_id` | 🤖 ✅ (código+testes; sem validação ao vivo) |
 | 1.4b | Rodar SQL `asset_id` | 🧑 ✅ |
 | 1.4c | Configurar `GITHUB_RELEASE_TOKEN` na Vercel | 🧑 ✅ |
-| 1.5 | Testar build local | 🧑🤖 |
+| 1.5 | Testar build local (incl. download real contra release de teste) | 🧑🤖 ✅ |
 | 1.6 | Publicar release no GitHub | 🧑 |
 | 1.7 | Atualizar tabela com a release real (incl. `asset_id`) | 🤖 |
 | 1.8 | Validar "v2" fake | 🧑🤖 |
