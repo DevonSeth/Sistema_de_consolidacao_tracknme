@@ -502,6 +502,14 @@ def configurar_validacao_atendimento(
     Faixa de linhas limitada a 300, mesmo valor e mesmo motivo já usado
     nos outros dropdowns/checkboxes dessas 2 abas (ver comentário de
     `_LINHA_LIMITE_VALIDACAO`).
+
+    Achado ao vivo 2026-08-14/15 (auditoria de validações): `showCustomUi`
+    do gspread vem `False` por padrão — sem passar `True`, a validação
+    valia (célula aceita/rejeita certo) mas o Sheets nunca desenhava a
+    setinha/lista suspensa de verdade na célula. Mesmo bug corrigido em
+    `configurar_validacao_alertas`/`configurar_validacao_situacao_manual`/
+    `configurar_validacao_retornou_conseguiu_agendar`/`configurar_
+    validacao_status_puma`.
     """
     for aba in _ABAS_COM_ATENDIMENTO:
         cabecalho = _CABECALHOS_OPERACIONAL[aba]
@@ -514,7 +522,8 @@ def configurar_validacao_atendimento(
             letra = _coluna_letra(cabecalho.index(coluna) + 1)
             intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
             ws.add_validation(
-                intervalo, ValidationConditionType.one_of_list, valores, strict=False
+                intervalo, ValidationConditionType.one_of_list, valores,
+                strict=False, showCustomUi=True,
             )
 
 
@@ -560,6 +569,84 @@ def configurar_checkboxes_tratativas() -> None:
     """
     for coluna in _COLUNAS_CHECKBOX_TRATATIVAS:
         _configurar_checkbox("Tratativas", coluna)
+
+
+_SITUACAO_MANUAL_VALORES = ["Agendado", "Cancelado", "Solicitação operacional"]
+
+
+def configurar_validacao_situacao_manual() -> None:
+    """Configura o dropdown da coluna "Situação Manual" em "Tratativas" —
+    SETUP, mesma natureza de `configurar_validacao_atendimento`/
+    `configurar_validacao_alertas` (roda uma vez, não faz parte do
+    pipeline recorrente).
+
+    Achado ao vivo 2026-08-14 (auditoria de validações): documentada
+    desde 2026-08-07 (`docs/planilha_operacional.md`), mas nunca tinha
+    sido implementada de fato — a coluna sempre existiu como texto livre,
+    sem nenhuma validação configurada na planilha real. `showCustomUi=True`
+    é obrigatório aqui — sem isso a validação vale mas não aparece como
+    dropdown de verdade na célula (achado ao vivo, mesma auditoria).
+    """
+    cabecalho = _CABECALHOS_OPERACIONAL["Tratativas"]
+    ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Tratativas")
+    letra = _coluna_letra(cabecalho.index("Situação Manual") + 1)
+    intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
+    ws.add_validation(
+        intervalo, ValidationConditionType.one_of_list, _SITUACAO_MANUAL_VALORES,
+        strict=False, showCustomUi=True,
+    )
+
+
+_RETORNOU_CONSEGUIU_AGENDAR_VALORES = ["Sim", "Não"]
+
+
+def configurar_validacao_retornou_conseguiu_agendar() -> None:
+    """Configura os dropdowns de `Retornou?`/`Conseguiu Agendar?` em
+    `Pendente de Ligação` — SETUP, mesma natureza de
+    `configurar_validacao_situacao_manual`.
+
+    Achado ao vivo 2026-08-15 (auditoria de validações): `docs/planilha_
+    operacional.md` documenta essas 2 colunas como configuradas ao vivo
+    desde 2026-08-07, mas a planilha real está sem validação nenhuma —
+    nunca existiu uma função `configurar_*` versionada em código pra
+    recriá-las, então o `limpar_validacoes_aba()` da sessão anterior (que
+    limpa a faixa inteira antes de recriar só o que tem função de
+    recriação) as apagou e elas nunca voltaram. `strict=False` de
+    propósito — célula vazia é um 3º estado com significado próprio
+    (`docs/planilha_operacional.md`), não pode ser bloqueada.
+    """
+    cabecalho = _CABECALHOS_OPERACIONAL["Pendente de Ligação"]
+    ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Pendente de Ligação")
+    for coluna in ("Retornou?", "Conseguiu Agendar?"):
+        letra = _coluna_letra(cabecalho.index(coluna) + 1)
+        intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
+        ws.add_validation(
+            intervalo, ValidationConditionType.one_of_list,
+            _RETORNOU_CONSEGUIU_AGENDAR_VALORES, strict=False, showCustomUi=True,
+        )
+
+
+_STATUS_PUMA_VALORES = ["aguardando_acao", "em_andamento", "concluido"]
+
+
+def configurar_validacao_status_puma() -> None:
+    """Configura o dropdown da coluna `Status` em `Encaminhar pra Puma` —
+    SETUP, mesma natureza de `configurar_validacao_situacao_manual`.
+
+    Gap conhecido desde 2026-08-14 (`docs/planilha_operacional.md`,
+    "Correção de validação/cabeçalho"): nunca existiu função pra essa
+    coluna. Valores internos exatos (`aguardando_acao`/`em_andamento`/
+    `concluido`) — mesmo texto que `Status Sistema` já mostra em
+    `Tratativas`, decisão de manter consistência em vez de traduzir.
+    """
+    cabecalho = _CABECALHOS_OPERACIONAL["Encaminhar pra Puma"]
+    ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Encaminhar pra Puma")
+    letra = _coluna_letra(cabecalho.index("Status") + 1)
+    intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
+    ws.add_validation(
+        intervalo, ValidationConditionType.one_of_list, _STATUS_PUMA_VALORES,
+        strict=False, showCustomUi=True,
+    )
 
 
 _ABAS_CABECALHO_FORMATADO = [
@@ -664,7 +751,8 @@ def configurar_validacao_alertas() -> None:
     letra = _coluna_letra(cabecalho.index("Ação") + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
     ws.add_validation(
-        intervalo, ValidationConditionType.one_of_list, _ACAO_ALERTA_VALORES, strict=False
+        intervalo, ValidationConditionType.one_of_list, _ACAO_ALERTA_VALORES,
+        strict=False, showCustomUi=True,
     )
 
 

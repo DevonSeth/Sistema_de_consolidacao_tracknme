@@ -921,6 +921,99 @@ td.acoes {
   color: inherit;
 }
 
+/* Manual do Sistema — reaproveita os tokens de .painel-db/.card-integracao/
+   .banner-watchdog-item, sem nenhuma cor nova (ver docs/pop_administrador.md
+   seção 11 e o achado de 2026-08-15 sobre a página estar "sem hierarquia"). */
+.manual-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 20px;
+}
+.manual-secao {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow);
+  scroll-margin-top: 12px;
+}
+.manual-secao h2 {
+  font-size: 15px;
+  font-weight: 650;
+  margin: 0 0 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.manual-secao .desc {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.manual-subcards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.manual-subcard {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.manual-subcard .titulo {
+  font-size: 13px;
+  font-weight: 600;
+}
+.manual-subcard .desc {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.manual-callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-wash);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  margin: 12px 0;
+}
+.manual-callout.atencao {
+  border-left-color: var(--nivel-3);
+  background: var(--status-ocioso-bg);
+}
+ol.manual-steps {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  counter-reset: manual-step;
+}
+ol.manual-steps li {
+  counter-increment: manual-step;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12.5px;
+  margin-bottom: 8px;
+}
+ol.manual-steps li::before {
+  content: counter(manual-step);
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Gráficos (Passo 7, gráficos de barra/tendência) */
 .legenda-grafico {
   display: flex;
@@ -1217,7 +1310,8 @@ td.acoes {
   }
 
   .painel-db,
-  .kpi {
+  .kpi,
+  .manual-secao {
     box-shadow: none !important;
     break-inside: avoid;
     page-break-inside: avoid;

@@ -134,13 +134,15 @@ class WorksheetComValidacao(WorksheetFalso):
         super().__init__()
         self.validacoes = []
 
-    def add_validation(self, range, condition_type, values, strict=False):
-        self.validacoes.append((range, condition_type, values, strict))
+    def add_validation(self, range, condition_type, values, strict=False, showCustomUi=False):
+        self.validacoes.append((range, condition_type, values, strict, showCustomUi))
 
 
 def _validacao_esperada(cabecalho, coluna, valores):
     letra = sheets._coluna_letra(cabecalho.index(coluna) + 1)
-    return (f"{letra}2:{letra}300", sheets.ValidationConditionType.one_of_list, valores, False)
+    # showCustomUi=True obrigatório em toda ONE_OF_LIST — achado 2026-08-14/15:
+    # sem isso a validação vale mas o Sheets não desenha o dropdown de verdade.
+    return (f"{letra}2:{letra}300", sheets.ValidationConditionType.one_of_list, valores, False, True)
 
 
 def test_configurar_validacao_atendimento_aplica_nas_2_abas(monkeypatch):
@@ -163,6 +165,41 @@ def test_configurar_validacao_atendimento_aplica_nas_2_abas(monkeypatch):
         ]
 
 
+def test_configurar_validacao_situacao_manual(monkeypatch):
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.configurar_validacao_situacao_manual()
+
+    assert fake.validacoes == [
+        _validacao_esperada(sheets.CABECALHO_TRATATIVAS, "Situação Manual", sheets._SITUACAO_MANUAL_VALORES)
+    ]
+
+
+def test_configurar_validacao_retornou_conseguiu_agendar(monkeypatch):
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.configurar_validacao_retornou_conseguiu_agendar()
+
+    cabecalho = sheets.CABECALHO_PENDENTE_LIGACAO
+    assert fake.validacoes == [
+        _validacao_esperada(cabecalho, "Retornou?", sheets._RETORNOU_CONSEGUIU_AGENDAR_VALORES),
+        _validacao_esperada(cabecalho, "Conseguiu Agendar?", sheets._RETORNOU_CONSEGUIU_AGENDAR_VALORES),
+    ]
+
+
+def test_configurar_validacao_status_puma(monkeypatch):
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.configurar_validacao_status_puma()
+
+    assert fake.validacoes == [
+        _validacao_esperada(sheets.CABECALHO_ENCAMINHAR_PUMA, "Status", sheets._STATUS_PUMA_VALORES)
+    ]
+
+
 def test_configurar_checkbox_finalizado_pendente_ligacao(monkeypatch):
     fake = WorksheetComValidacao()
     monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
@@ -170,7 +207,7 @@ def test_configurar_checkbox_finalizado_pendente_ligacao(monkeypatch):
     sheets.configurar_checkbox_finalizado_pendente_ligacao()
 
     letra = sheets._coluna_letra(sheets.CABECALHO_PENDENTE_LIGACAO.index("Finalizado") + 1)
-    assert fake.validacoes == [(f"{letra}2:{letra}300", sheets.ValidationConditionType.boolean, [], True)]
+    assert fake.validacoes == [(f"{letra}2:{letra}300", sheets.ValidationConditionType.boolean, [], True, False)]
 
 
 class WorksheetComFormato(WorksheetFalso):
@@ -281,6 +318,7 @@ def test_configurar_checkboxes_tratativas_aplica_nas_4_colunas(monkeypatch):
             sheets.ValidationConditionType.boolean,
             [],
             True,
+            False,
         )
         for coluna in sheets._COLUNAS_CHECKBOX_TRATATIVAS
     ]

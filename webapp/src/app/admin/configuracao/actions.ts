@@ -4,25 +4,12 @@ import { revalidatePath } from "next/cache";
 
 import { obterAccessToken } from "@/lib/google-auth";
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
+import { lerSegredo, lerSegredoRaw } from "@/lib/vault-credenciais";
 
 import { CAMPOS_SECAO, CAMPOS_SECRETOS, type Secao } from "./meta";
 
 type ResultadoAction = { erro?: string };
 type ResultadoTeste = { ok: boolean; mensagem: string };
-
-async function lerSegredoRaw(secao: string): Promise<string | null> {
-  const supabase = createSupabaseServiceClient();
-  const { data, error } = await supabase.rpc("credenciais_buscar_decifrado", {
-    p_secao: secao,
-  });
-  if (error) throw new Error(error.message);
-  return (data as string | null) ?? null;
-}
-
-async function lerSegredo(secao: string): Promise<Record<string, unknown>> {
-  const bruto = await lerSegredoRaw(secao);
-  return bruto ? JSON.parse(bruto) : {};
-}
 
 async function gravarSegredo(secao: string, valores: Record<string, unknown>): Promise<void> {
   const supabase = createSupabaseServiceClient();

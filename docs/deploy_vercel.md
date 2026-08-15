@@ -145,53 +145,89 @@ automaticamente, a cada `git push` pra `main`). Quando terminar:
 Se algo quebrar aqui, provavelmente é env var faltando/errada — a
 Vercel mostra o log de build e de runtime na própria tela do projeto.
 
-### 0.8 🤖 Implementar de verdade os 2 endpoints que faltam
+### 0.8 🤖 Implementar de verdade os 2 endpoints que faltam — CONCLUÍDO 2026-08-15
 
-Hoje `POST /api/operador/provisionar` e `GET /api/operador/credenciais/
-versao` são stubs (sempre HTTP 501). Contrato proposto (vou desenhar
-com `EnterPlanMode` quando chegarmos aqui, isto é só a visão geral):
+`POST /api/operador/provisionar` e `GET /api/operador/credenciais/
+versao` implementados de verdade (`webapp/src/app/api/operador/`).
+Contrato final (desenhado com `EnterPlanMode`):
 
-- **`POST /api/operador/provisionar`** — recebe `{ token }` (o token de
-  uso único que o Admin gera na tela de Configuração). Valida contra
-  `provisioning_tokens` (hash bate, não expirou, não usado ainda) →
-  marca o token como usado → cria uma linha nova em `maquinas_operador`
-  com uma `chave_maquina` gerada na hora → chama a RPC `credenciais_
-  buscar_decifrado` pra cada seção de credencial → devolve tudo
-  (credenciais decifradas + a `chave_maquina` nova) numa resposta só.
-- **`GET /api/operador/credenciais/versao`** — a máquina manda sua
-  `chave_maquina` (autenticação — ainda a definir se por header
-  `Authorization: Bearer` ou HMAC assinado, decido na hora do plano) →
-  o endpoint confere contra `maquinas_operador` → compara com
-  `credenciais_versao` → responde se precisa sincronizar de novo.
+- **`POST /api/operador/provisionar`** — recebe `{ token }`. Valida
+  contra `provisioning_tokens` via `UPDATE ... WHERE token_hash = ? AND
+  usado_em IS NULL AND expira_em > now() RETURNING *` (atômico, evita
+  corrida de uso duplo) → 401 genérico se não achou linha (não distingue
+  "não existe"/"expirado"/"já usado", evita virar oráculo) → cria linha
+  em `maquinas_operador` com `chave_maquina` nova (`randomBytes(32)`,
+  guardada só como `sha256` em `chave_hash`) → busca as 5 seções via
+  `credenciais_buscar_decifrado` → devolve `{ chave_maquina,
+  credenciais }`.
+- **`GET /api/operador/credenciais/versao`** — autenticação por header
+  `Authorization: Bearer <chave_maquina>` (decisão: TLS da Vercel já
+  cobre o transporte, HMAC seria complexidade sem ganho real aqui) →
+  hash comparado contra `maquinas_operador.chave_hash` (401 se não achar
+  ou `revogado_em` preenchido) → devolve `{ versoes, credenciais }`
+  **sempre as 5 seções** (não só quem mudou) — fecha o ciclo de rotação
+  com só 2 endpoints, sem precisar de um 3º; quem decide o que aplicar
+  localmente é o cliente Python, comparando contra a última versão
+  conhecida.
+- Lógica de leitura do Vault extraída pra `webapp/src/lib/vault-
+  credenciais.ts` (`lerSegredo`/`lerSegredoRaw`/`listarVersoes`),
+  reaproveitada também por `admin/configuracao/actions.ts` (antes
+  duplicada ali).
+- **Achado**: `google_sheets.credenciais_path` guardado no Vault é o
+  caminho da máquina que migrou primeiro (`_handoff/migrar_credenciais_
+  vault.py`) — nunca reaproveitável noutra máquina. O passo 0.9 sempre
+  substitui esse campo pelo caminho local recém-escrito.
 
-### 0.9 🤖 Lado Python: consumir o provisionamento
+### 0.9 🤖 Lado Python: consumir o provisionamento — CONCLUÍDO 2026-08-15
 
-- `main.py` ganha parsing de argumento `--provisionar <token>` (hoje não
-  existe nenhum parsing de CLI arg).
-- Nova função (`config/manager.py` ou um novo `integrations/
-  provisionamento_client.py`) que chama `POST /api/operador/
-  provisionar` com o token, recebe as credenciais + `chave_maquina`, e
-  grava tudo no keyring via `salvar_config` (já existe, sem mudança).
-- Nova checagem, na abertura normal do app (não só no provisionamento),
-  que chama `GET /api/operador/credenciais/versao` e sincroniza se
-  mudou — este é o ponto que fecha o ciclo de rotação de credencial.
+- `main.py` ganhou `--provisionar <token> --base-url <url>` (via
+  `argparse`, `main(argv=None)` — `argv` explícito evita depender do
+  `sys.argv` de quem chama `main()` programaticamente, ex: testes).
+- `integrations/provisionamento_client.py` (novo): `provisionar_maquina`
+  (chama `POST /provisionar`, escreve o `.json` da service account do
+  Google Sheets num arquivo local novo, e grava tudo via `config.
+  manager.salvar_config` — sem lógica de keyring nova) e `verificar_e_
+  sincronizar` (chamada na abertura normal, via `main.py` sem args) —
+  no-op silencioso se a máquina nunca foi provisionada por este fluxo,
+  e **soft-fail** em qualquer erro de rede/HTTP (nunca derruba a
+  abertura do app, mesmo espírito do watchdog). Só reaplica localmente
+  as seções cuja versão realmente mudou (`versoes_conhecidas`, campo
+  novo e não-secreto em `config.json`, seção `provisionamento`).
+- `config/manager.py` ganhou a seção `provisionamento` (`base_url`
+  não-secreto, `chave_maquina` no keyring) — reaproveitando 100% a
+  infraestrutura genérica já existente (`CAMPOS_OBRIGATORIOS`/
+  `CAMPOS_SECRETOS`/`salvar_config`), sem mudar nenhuma lógica.
+- 8 testes novos (`tests/test_provisionamento_client.py` + 2 em
+  `tests/test_main.py`), tudo mockado (nunca toca o keyring real desta
+  máquina).
 
-### 0.10 🧑🤖 Validação ao vivo (juntos)
+### 0.10 🧑🤖 Validação ao vivo — CONCLUÍDO 2026-08-15
 
-Mesmo princípio de sempre pra testar API/função nova pela primeira vez —
-com dado descartável, nunca produção real:
-1. Gero um token de teste (via SQL direto, uso único, expiração curta).
-2. Rodamos `python main.py --provisionar <token-de-teste>` numa
-   "máquina" de teste (pode ser esta mesma, com um keyring de teste
-   separado).
-3. Confirmamos: keyring gravado certo, token marcado como usado,
-   reusar o mesmo token é bloqueado, token expirado é bloqueado.
-4. Limpo o dado de teste (`maquinas_operador`/`provisioning_tokens` de
-   teste) ao final.
+`_handoff/verificar_provisionamento.py` (mantido no repo como registro,
+só leitura de segredo — nunca imprime valor, só confirma presença/
+formato das chaves): insere 2 tokens de teste direto via `service_role`
+(não precisou de SQL manual do usuário — `provisioning_tokens` é tabela
+normal, sem policy, só `service_role` toca) e valida contra o servidor
+`next dev` real (Vault real) via `httpx` cru:
+1. Token válido → 200, formato de `credenciais` correto.
+2. Reusar o mesmo token → 401.
+3. Token expirado → 401.
+4. `GET /credenciais/versao` com a `chave_maquina` real recebida → 200,
+   5 seções com versão.
+5. `GET` com chave inventada → 401.
 
-**Fase 0 concluída quando**: `/api/operador/provisionar` e `/api/
-operador/credenciais/versao` respondem de verdade (não mais 501), e o
-teste acima passa.
+**Decisão de segurança importante**: o script **nunca chama
+`provisionar_maquina`/`verificar_e_sincronizar` de verdade** — essas
+funções gravam segredo via `salvar_config`, que usa o keyring REAL do
+SO sob a MESMA chave de serviço (`SERVICO_KEYRING`) da configuração de
+produção desta máquina; rodar de verdade sobrescreveria as credenciais
+reais desta máquina com valor de teste. Essa lógica de "aplicar
+localmente" já está coberta pelos testes mockados (0.9) — o script de
+0.10 valida só o contrato HTTP/Vault real. Ao final, apaga os 2 tokens
+de teste + a `maquinas_operador` criada no meio do teste.
+
+**Fase 0 concluída** — os 2 endpoints respondem de verdade (não mais
+501) e o teste ao vivo passou de ponta a ponta. 613 testes Python.
 
 ---
 
@@ -287,9 +323,9 @@ confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
 | 0.5 | Criar projeto na Vercel (Root Directory = `webapp`) | 🧑 |
 | 0.6 | Env vars na Vercel | 🧑 |
 | 0.7 | Smoke test do deploy | 🧑 (eu confirmo junto) |
-| 0.8 | Implementar `/provisionar` e `/credenciais/versao` | 🤖 |
-| 0.9 | `main.py --provisionar` + client Python | 🤖 |
-| 0.10 | Validar com token de teste descartável | 🧑🤖 |
+| 0.8 | Implementar `/provisionar` e `/credenciais/versao` | 🤖 ✅ |
+| 0.9 | `main.py --provisionar` + client Python | 🤖 ✅ |
+| 0.10 | Validar com token de teste descartável | 🧑🤖 ✅ |
 | 1.1 | SQL `launcher_versao_atual` | 🧑 |
 | 1.2 | Implementar `/versao-atual` de verdade | 🤖 |
 | 1.3 | `.spec` PyInstaller do Painel Operador | 🤖 |

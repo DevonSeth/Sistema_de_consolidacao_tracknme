@@ -536,3 +536,56 @@ precisa preencher do que é só informativo:
 `_runs_por_cor`) em vez de 1 cor só pra aba inteira, e passou a cobrir
 as 5 abas (antes só 3 — "Alertas"/"Análise de Divergência - Instalação"
 ficaram de fora por engano).
+
+## Auditoria de validações (dropdowns/checkboxes) — 2026-08-15
+
+Usuário revisou a planilha real e reportou "Situação Manual"/
+"Atendimento"/"Base"/"Ponto de Ação"/"Status" (Puma) sem dropdown. Nova
+auditoria (`_handoff/auditoria_validacoes_planilha_operacional.py`, só
+leitura, `fetch_sheet_metadata` nas 5 abas) confirmou 3 causas
+diferentes, misturadas:
+
+1. **Bug sistêmico de código, achado novo**: `gspread.Worksheet.
+   add_validation` tem um parâmetro `showCustomUi` que **vem `False` por
+   padrão** — sem passar `True`, uma validação `ONE_OF_LIST` continua
+   validando o valor digitado (aceita/rejeita certo), mas o Google Sheets
+   nunca desenha a setinha/lista suspensa de verdade na célula. Nenhuma
+   chamada de `add_validation` no código passava esse parâmetro — isso
+   inclui `configurar_validacao_atendimento` (Atendimento/Base/Ponto de
+   Ação, já configurado desde 2026-08-10/14) e `configurar_validacao_
+   alertas` (Ação), que pareciam "prontos" pela metadata mas nunca
+   mostravam a UI de dropdown de verdade. **Corrigido nas 2 funções
+   existentes + em toda função nova** (`showCustomUi=True` em todo
+   `add_validation` de `ValidationConditionType.one_of_list`).
+   Checkboxes (`ValidationConditionType.boolean`) não são afetados —
+   sempre renderizam como caixa de seleção independente desse parâmetro,
+   já confirmado ao vivo antes (2026-08-07).
+2. **"Situação Manual" (Tratativas) nunca tinha sido implementada** —
+   documentada desde 2026-08-07, mas sem nenhuma função `configurar_*`
+   correspondente. `configurar_validacao_situacao_manual()` novo
+   (`Agendado`/`Cancelado`/`Solicitação operacional`, `strict=False`).
+3. **"Retornou?"/"Conseguiu Agendar?" (Pendente de Ligação), achado
+   novo**: documentadas como configuradas ao vivo desde 2026-08-07, mas
+   sem função versionada em código pra recriá-las — o `limpar_
+   validacoes_aba()` da auditoria anterior (2026-08-14) limpa a faixa
+   inteira antes de recriar só o que tem função de recriação, então
+   essas 2 colunas foram limpas e nunca voltaram. `configurar_validacao_
+   retornou_conseguiu_agendar()` novo (`Sim`/`Não`, `strict=False`).
+4. **"Status" (Encaminhar pra Puma)** — gap já conhecido desde
+   2026-08-14 (ver seção acima), agora fechado: `configurar_validacao_
+   status_puma()` novo (`aguardando_acao`/`em_andamento`/`concluido`,
+   `strict=False`).
+
+**"Técnico" (Tratativas)** também apareceu sem validação na auditoria —
+mas esse dropdown é intencionalmente gerenciado à mão pelo admin/
+atendente direto na planilha (fora do código, ver seção acima), não uma
+correção de código. Provavelmente foi arrastado pelo mesmo `limpar_
+validacoes_aba()` de 2026-08-14 (que limpa a faixa inteira, sem exceção)
+— fica por conta do usuário recriar manualmente na planilha quando
+quiser.
+
+As 5 funções (2 corrigidas + 3 novas) foram rodadas ao vivo contra a
+planilha real e reconfirmadas lendo a metadata de volta
+(`showCustomUi=True` em todos os 10 dropdowns das 4 abas) — usuário
+confirmou visualmente que a setinha aparece em todas. 3 testes novos em
+`tests/test_google_sheets_client.py` (602 → 605).
