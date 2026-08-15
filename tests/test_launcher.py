@@ -237,6 +237,29 @@ def test_main_fluxo_completo_feliz(monkeypatch):
     assert chamadas == ["registrar", "buscar_versao", "garantir_versao", ("abrir", "caminho/exe")]
 
 
+def test_main_abrir_painel_falha_mostra_erro_em_vez_de_propagar(monkeypatch):
+    """Achado ao vivo (passo 1.5): um `PainelOperador.exe` inválido/corrompido
+    faz `subprocess.Popen` levantar `OSError` (ex: WinError 216) — isso não
+    pode virar uma stack trace sem tratamento pro usuário final."""
+    monkeypatch.setattr(launcher, "registrar_protocolo_se_necessario", lambda: None)
+    monkeypatch.setattr(launcher, "buscar_versao_atual", lambda base_url: {"versao": "8.0.0"})
+    monkeypatch.setattr(
+        launcher, "garantir_versao_local", lambda base_url, info, fabrica_janela=None: "caminho/exe"
+    )
+
+    def _abrir_falha(exe):
+        raise OSError("WinError 216: binario invalido")
+
+    monkeypatch.setattr(launcher, "abrir_painel", _abrir_falha)
+    erros = []
+    monkeypatch.setattr(launcher, "_mostrar_erro", lambda msg: erros.append(msg))
+
+    launcher.main([])  # não deve propagar o OSError
+
+    assert len(erros) == 1
+    assert "WinError 216" in erros[0]
+
+
 def test_main_erro_de_integridade_mostra_erro_e_nao_abre(monkeypatch):
     monkeypatch.setattr(launcher, "registrar_protocolo_se_necessario", lambda: None)
     monkeypatch.setattr(launcher, "buscar_versao_atual", lambda base_url: {"versao": "7.0.0"})
