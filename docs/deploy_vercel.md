@@ -427,29 +427,39 @@ hora: `abrir_painel()` não tratava `OSError` de um executável inválido
 — corrigido (commit `9c755b2`). 637 testes Python. Detalhe completo em
 `_handoff/HANDOFF.md`, seção "Fase 1, passo 1.5".
 
-### 1.6 🧑 Publicar a 1ª release no GitHub Releases
+### 1.6 🧑 Publicar a 1ª release no GitHub Releases — CONCLUÍDO 2026-08-15
 
-Depois do build validado localmente: criar uma release no GitHub (UI ou
-`gh release create`, se instalarmos a CLI do GitHub também), subir o
-`.zip` como asset, anotar a URL de download direta do asset.
+`PainelOperador.exe` rebuildado de verdade (`pyinstaller
+PainelOperador.spec`, ~861MB com Chromium embutido), zipado com
+`shutil.make_archive` do Python (não `Compress-Archive` do PowerShell —
+corrompeu o caminho acentuado do projeto 2x, `.ps1` sem BOM é lido como
+ANSI pelo PowerShell 5.1; Python lida com Unicode nativamente), arquivos
+direto na raiz do zip (~401MB). Publicado como release real `v1.0.0`
+(não pre-release) no GitHub.
 
-### 1.7 🤖 Atualizar `launcher_versao_atual` com a release real
+### 1.7 🤖 Atualizar `launcher_versao_atual` com a release real — CONCLUÍDO 2026-08-15
 
-Script de 1x (ou você mesmo, é só um `INSERT`) gravando `versao`/
-`url_download`/`sha256`/**`asset_id`** (novo, passo 1.4 — o ID numérico
-do asset na release, necessário pra rota `GET /api/operador/
-download/[versao]` chamar a API do GitHub) da release publicada no
-passo 1.6.
+`INSERT` direto (via `service_role_key`) gravando `versao=1.0.0`,
+`url_download`, `sha256` e `asset_id` reais da release `v1.0.0`.
+Confirmado ao vivo via `GET /api/operador/versao-atual` em produção.
 
-### 1.8 🧑🤖 Validação: "versão 2" fake (juntos)
+### 1.8 🧑🤖 Validação: "versão 2" fake (juntos) — CONCLUÍDO 2026-08-15
 
-Mesmo teste que o plano de arquitetura já previa: publicar uma "v2"
-fake (pode ser literalmente a mesma build com o número trocado),
-confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
-(a v1 continua intacta e executável).
+v1.0.0 simulada como já instalada localmente (cópia do `.exe` real,
+sem precisar rebaixar 401MB), release de teste `v2.0.0-fake`
+(pre-release, zip pequeno de placeholder) publicada e apagada depois
+de validar. Confirmado por hash+mtime: a pasta `versoes/1.0.0/` ficou
+byte-a-byte idêntica depois de baixar a v2 numa pasta separada —
+prova que o esquema de múltiplas versões nunca sobrescreve uma versão
+existente. Achado ao vivo corrigido: `abrir_painel()` não tratava
+`OSError` de um executável inválido/corrompido — agora mostra erro
+amigável em vez de propagar a exceção (commit `9c755b2`).
 
 **Fase 1 concluída quando**: o teste do passo 1.8 passa e o `Launcher.exe`
-é o único `.exe` que o usuário final abre no dia a dia.
+é o único `.exe` que o usuário final abre no dia a dia. **CONCLUÍDA
+2026-08-15** — release `v1.0.0` real publicada, tabela apontando pra
+ela, multi-versão validado (v2 não sobrescreve v1). Detalhe completo em
+`_handoff/HANDOFF.md`, seção "Fase 1 CONCLUÍDA".
 
 ---
 
@@ -474,6 +484,6 @@ confirmar que o Launcher baixa e roda a v2 **sem tocar** na pasta da v1
 | 1.4b | Rodar SQL `asset_id` | 🧑 ✅ |
 | 1.4c | Configurar `GITHUB_RELEASE_TOKEN` na Vercel | 🧑 ✅ |
 | 1.5 | Testar build local (incl. download real contra release de teste) | 🧑🤖 ✅ |
-| 1.6 | Publicar release no GitHub | 🧑 |
-| 1.7 | Atualizar tabela com a release real (incl. `asset_id`) | 🤖 |
-| 1.8 | Validar "v2" fake | 🧑🤖 |
+| 1.6 | Publicar release no GitHub | 🧑 ✅ (`v1.0.0`) |
+| 1.7 | Atualizar tabela com a release real (incl. `asset_id`) | 🤖 ✅ |
+| 1.8 | Validar "v2" fake | 🧑🤖 ✅ |
