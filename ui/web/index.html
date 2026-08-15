@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Consolidação Track N'Me — Operação</title>
+  <title>Consolidação Track N'Me — Painel Operador</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -18,83 +18,274 @@
       </div>
 
       <div class="sidebar-section-label">Menu</div>
-      <button class="nav-item active"><span class="ic">▣</span> Operação</button>
+      <button class="nav-item active" data-section="operacao"><span class="ic">▣</span> Fases da Automação</button>
+      <button class="nav-item" data-section="dashboard"><span class="ic">▤</span> Dashboard</button>
+      <button class="nav-item" data-section="manual"><span class="ic">📘</span> Manual</button>
     </nav>
 
     <main class="content">
-      <div class="page-header">
-        <div>
-          <h1>Operação</h1>
-          <div class="desc">Rode e acompanhe as etapas do robô, uma a uma ou em cadeia.</div>
+
+      <div class="content-section active" data-section="operacao">
+        <div class="page-header">
+          <div>
+            <h1>Fases da Automação</h1>
+            <div class="desc">Rode e acompanhe as etapas do robô, uma a uma ou em cadeia.</div>
+          </div>
+        </div>
+
+        <div class="banner-watchdog" id="banner-watchdog" hidden></div>
+
+        <div class="banner-reconexao" id="banner-reconexao" hidden>
+          <span id="banner-reconexao-texto"></span>
+          <button id="btn-continuar">Já logei, continuar</button>
+        </div>
+
+        <div class="banner-travado" id="banner-travado" hidden>
+          Outra máquina já está executando o robô agora — aguarde terminar antes de rodar de novo.
+        </div>
+
+        <div class="barra-acoes">
+          <button class="btn primary" id="btn-executar-selecionadas">Executar selecionadas</button>
+          <button class="btn ghost" id="btn-executar-tudo">Executar tudo</button>
+          <button class="btn perigo" id="btn-cancelar" disabled>Cancelar</button>
+          <div class="spacer"></div>
+          <div class="selecionadas-info" id="selecionadas-info">0 etapas selecionadas</div>
+        </div>
+
+        <div id="lista-fases"></div>
+
+        <div class="legenda">
+          <div class="item"><span class="selo selo-ocioso">Ocioso</span> nunca rodou / esperando</div>
+          <div class="item"><span class="selo selo-rodando">Rodando</span> em execução agora</div>
+          <div class="item"><span class="selo selo-sucesso">Sucesso</span> concluída sem erro</div>
+          <div class="item"><span class="selo selo-erro">Erro</span> falhou, ver mensagem</div>
+          <div class="item"><span class="selo selo-aguardando_reconexao">Aguardando você</span> sessão caiu, precisa relogar</div>
         </div>
       </div>
 
-      <div class="banner-watchdog" id="banner-watchdog" hidden></div>
-
-      <div class="resumo-grid">
-        <div class="resumo-card">
-          <div class="rotulo"><span class="dot manutencao"></span>Manutenção — por tratar</div>
-          <div class="valor" id="resumo-manutencao">—</div>
+      <div class="content-section" data-section="dashboard">
+        <div class="page-header">
+          <div>
+            <h1>Dashboard</h1>
+            <div class="desc">Indicadores e métricas pra apoiar sua priorização do dia.</div>
+          </div>
         </div>
-        <div class="resumo-card">
-          <div class="rotulo"><span class="dot instalacao"></span>Instalação — por tratar</div>
-          <div class="valor" id="resumo-instalacao">—</div>
+
+        <div class="resumo-grid">
+          <div class="resumo-card">
+            <div class="rotulo"><span class="dot manutencao"></span>Manutenção — por tratar</div>
+            <div class="valor" id="resumo-manutencao">—</div>
+          </div>
+          <div class="resumo-card">
+            <div class="rotulo"><span class="dot instalacao"></span>Instalação — por tratar</div>
+            <div class="valor" id="resumo-instalacao">—</div>
+          </div>
+          <div class="resumo-card">
+            <div class="rotulo"><span class="dot remocao"></span>Remoção — por tratar</div>
+            <div class="valor" id="resumo-remocao">—</div>
+          </div>
+          <div class="resumo-card robo">
+            <div class="rotulo">Status do robô</div>
+            <div class="valor"><span class="robo-dot" id="robo-dot"></span><span id="robo-texto">Ocioso</span></div>
+          </div>
         </div>
-        <div class="resumo-card">
-          <div class="rotulo"><span class="dot remocao"></span>Remoção — por tratar</div>
-          <div class="valor" id="resumo-remocao">—</div>
+
+        <div class="painel-apoio-titulo">Painel de apoio</div>
+        <div class="painel-apoio-grid">
+          <div class="widget-apoio full" id="widget-fila-prioridade"></div>
+          <div class="widget-apoio" id="widget-sem-atendimento"></div>
+          <div class="widget-apoio" id="widget-funil-status"></div>
+          <div class="widget-apoio" id="widget-situacao-manual-parada"></div>
+          <div class="widget-apoio" id="widget-contato-invalido"></div>
+          <div class="widget-apoio full" id="widget-discrepancia-remocao"></div>
         </div>
-        <div class="resumo-card robo">
-          <div class="rotulo">Status do robô</div>
-          <div class="valor"><span class="robo-dot" id="robo-dot"></span><span id="robo-texto">Ocioso</span></div>
+
+        <div class="painel-apoio-titulo">Métricas do Admin (período filtrado)</div>
+        <form class="filtro-periodo" id="filtro-periodo-admin">
+          <label>De <input type="date" name="desde" id="filtro-desde" lang="pt-BR" /></label>
+          <label>Até <input type="date" name="ate" id="filtro-ate" lang="pt-BR" /></label>
+          <button type="submit" class="btn primary small">Filtrar</button>
+        </form>
+        <div class="resumo-grid" id="resumo-grid-periodo"></div>
+
+        <div class="painel-apoio-grid" id="painel-graficos-admin"></div>
+      </div>
+
+      <div class="content-section" data-section="manual">
+        <div class="page-header">
+          <div>
+            <h1>Manual</h1>
+            <div class="desc">O que o sistema faz, o passo a passo do dia a dia, e como alimentar a planilha — sem sair daqui.</div>
+          </div>
         </div>
-      </div>
 
-      <div class="painel-apoio-titulo">Painel de apoio</div>
-      <div class="painel-apoio-grid">
-        <div class="widget-apoio full" id="widget-fila-prioridade"></div>
-        <div class="widget-apoio" id="widget-sem-atendimento"></div>
-        <div class="widget-apoio" id="widget-funil-status"></div>
-        <div class="widget-apoio" id="widget-situacao-manual-parada"></div>
-        <div class="widget-apoio" id="widget-contato-invalido"></div>
-        <div class="widget-apoio full" id="widget-discrepancia-remocao"></div>
-      </div>
+        <nav class="manual-nav">
+          <a href="#manual-visao-geral"><span class="ic">◧</span> Visão geral</a>
+          <a href="#manual-rotina"><span class="ic">▤</span> Rotina diária</a>
+          <a href="#manual-planilha"><span class="ic">◫</span> Como alimentar a planilha</a>
+          <a href="#manual-fases"><span class="ic">▣</span> Fases da automação</a>
+          <a href="#manual-avisos"><span class="ic">⚠</span> Avisos importantes</a>
+        </nav>
 
-      <div class="painel-apoio-titulo">Métricas do Admin (período filtrado)</div>
-      <form class="filtro-periodo" id="filtro-periodo-admin">
-        <label>De <input type="date" name="desde" id="filtro-desde" lang="pt-BR" /></label>
-        <label>Até <input type="date" name="ate" id="filtro-ate" lang="pt-BR" /></label>
-        <button type="submit" class="btn primary small">Filtrar</button>
-      </form>
-      <div class="resumo-grid" id="resumo-grid-periodo"></div>
+        <section class="manual-secao" id="manual-visao-geral">
+          <h2><span class="ic">◧</span> Visão geral</h2>
+          <p>
+            Você cuida do <strong>contato com o associado</strong> depois que o
+            sistema já identificou uma pendência (manutenção, instalação ou
+            remoção) e já calculou a urgência dela sozinho. O trabalho tem 3
+            frentes: <strong>priorizar e disparar</strong> o primeiro contato por
+            WhatsApp, <strong>ligar</strong> pras pendências que não
+            responderam, e <strong>registrar o resultado</strong> de cada
+            contato — encaminhando pra Puma quando não der certo.
+          </p>
+          <p class="texto-muted">
+            O sistema decide sozinho quando uma pendência nasce, qual a urgência
+            dela e quando ela avança pra próxima etapa da esteira (WhatsApp →
+            ligação → Puma). Se algo parecer estranho (uma urgência que não faz
+            sentido, um dado desatualizado), o motivo geralmente está a
+            montante — não é algo pra corrigir direto na planilha.
+          </p>
+        </section>
 
-      <div class="painel-apoio-grid" id="painel-graficos-admin"></div>
+        <section class="manual-secao" id="manual-rotina">
+          <h2><span class="ic">▤</span> Rotina diária</h2>
+          <ol class="manual-steps">
+            <li>Abra o app e rode a rotina do dia — tudo de uma vez, ou retome de onde parou se ontem foi interrompido.</li>
+            <li>Logue manualmente no SGA quando o app pedir (captcha impede login automático) — só uma vez por sessão.</li>
+            <li>Confirme a reconexão manual se o Track N'Me ou o SGA caírem no meio do processamento.</li>
+            <li>Abra a planilha e revise <strong>Tratativas</strong>, do maior <strong>Nível de Urgência</strong> pro menor (a cor da célula já ajuda a enxergar isso de cara).</li>
+            <li>Marque <strong>Selecionado</strong> nas linhas que devem receber WhatsApp neste ciclo.</li>
+            <li>Preencha <strong>Atendimento</strong> (+ <strong>Base</strong> ou <strong>Ponto de Ação</strong>, conforme a escolha) e, se fizer sentido, o <strong>Técnico</strong>.</li>
+            <li>Acompanhe <strong>Pendente de Ligação</strong> — ligue pras pendências que escalaram e registre o resultado.</li>
+            <li>Acompanhe <strong>Encaminhar pra Puma</strong> — casos que já passaram por toda a esteira sem sucesso.</li>
+            <li>Marque <strong>Finalizado</strong> sempre que resolver uma pendência por um caminho que o sistema não enxerga sozinho.</li>
+          </ol>
+        </section>
 
-      <div class="banner-reconexao" id="banner-reconexao" hidden>
-        <span id="banner-reconexao-texto"></span>
-        <button id="btn-continuar">Já logei, continuar</button>
-      </div>
+        <section class="manual-secao" id="manual-planilha">
+          <h2><span class="ic">◫</span> Como alimentar a planilha</h2>
+          <p>
+            A planilha "Operacional - Pendências - Puma" tem 4 abas. Em cada
+            uma, o cabeçalho da coluna já avisa quem preenche:
+          </p>
+          <div class="callout">
+            <span class="swatch swatch-sistema"></span> <strong>Cabeçalho navy</strong> — o sistema escreve a cada ciclo, nunca edite.
+            &nbsp;&nbsp;
+            <span class="swatch swatch-humano"></span> <strong>Cabeçalho accent (azul da marca)</strong> — você preenche manualmente.
+          </div>
 
-      <div class="banner-travado" id="banner-travado" hidden>
-        Outra máquina já está executando o robô agora — aguarde terminar antes de rodar de novo.
-      </div>
+          <div class="manual-abas">
+            <details class="manual-aba" open>
+              <summary>
+                <span class="manual-aba-titulo">Tratativas</span>
+                <span class="manual-aba-badge">10 campos</span>
+              </summary>
+              <p class="manual-aba-intro">A fila principal — priorizada por urgência, é onde a maior parte do seu dia acontece.</p>
+              <dl class="manual-campos">
+                <dt>Selecionado</dt><dd>Marca a linha pra entrar no próximo disparo de WhatsApp. Não reseta sozinho.</dd>
+                <dt>Atendimento</dt><dd>Base / Em rota / Ação — obrigatório antes do 1º disparo.</dd>
+                <dt>Base / Ponto de Ação</dt><dd>Preencha o que combinar com o Atendimento escolhido.</dd>
+                <dt>Técnico</dt><dd>Quando fizer sentido pra essa pendência.</dd>
+                <dt>Discrepância revisada</dt><dd>Esconde temporariamente um caso de remoção que você já está checando por fora.</dd>
+                <dt>Telefone corrigido</dt><dd>Libera um novo disparo depois de corrigir um WhatsApp inválido.</dd>
+                <dt>Situação Manual</dt><dd>Pausa a esteira automática — <strong>não</strong> remove a linha sozinha (marque Finalizado também).</dd>
+                <dt>Data Agendada</dt><dd>Data combinada com o associado, se houver.</dd>
+                <dt>Observação Manual</dt><dd>Qualquer anotação livre.</dd>
+                <dt>Finalizado</dt><dd><strong>Única forma de tirar a linha manualmente.</strong></dd>
+              </dl>
+            </details>
 
-      <div class="barra-acoes">
-        <button class="btn primary" id="btn-executar-selecionadas">Executar selecionadas</button>
-        <button class="btn ghost" id="btn-executar-tudo">Executar tudo</button>
-        <button class="btn perigo" id="btn-cancelar" disabled>Cancelar</button>
-        <div class="spacer"></div>
-        <div class="selecionadas-info" id="selecionadas-info">0 etapas selecionadas</div>
-      </div>
+            <details class="manual-aba">
+              <summary>
+                <span class="manual-aba-titulo">Pendente de Ligação</span>
+                <span class="manual-aba-badge">6 campos</span>
+              </summary>
+              <p class="manual-aba-intro">Chega aqui sozinha, depois de 3 tentativas de WhatsApp sem resposta.</p>
+              <dl class="manual-campos">
+                <dt>Atendimento / Base / Ponto de Ação</dt><dd>Editável de novo aqui — se descobrir na ligação que o tipo certo é outro.</dd>
+                <dt>Data Contato</dt><dd>Data em que você ligou.</dd>
+                <dt>Retornou?</dt><dd>O associado atendeu/retornou a ligação?</dd>
+                <dt>Conseguiu Agendar?</dt><dd>Só preencha se Retornou? = Sim.</dd>
+                <dt>Observação</dt><dd>Qualquer detalhe da ligação.</dd>
+                <dt>Finalizado</dt><dd>Sempre vence — ver regra abaixo.</dd>
+              </dl>
+              <div class="callout callout-atencao">
+                <strong>Regra de leitura:</strong> <code>Finalizado</code> marcado sempre vence. Sem ele —
+                <code>Retornou?</code> vazio → aguarda.
+                <code>Retornou? = Não</code> → vai sozinha pra Encaminhar pra Puma.
+                <code>Retornou? = Sim</code> + <code>Conseguiu Agendar? = Sim</code> → <strong>continua na aba</strong> (só sai quando marcar Finalizado, depois de confirmar que aconteceu de verdade).
+                <code>Retornou? = Sim</code> + <code>Conseguiu Agendar? = Não</code> → continua esperando um novo agendamento.
+              </div>
+            </details>
 
-      <div id="lista-fases"></div>
+            <details class="manual-aba">
+              <summary>
+                <span class="manual-aba-titulo">Encaminhar pra Puma</span>
+                <span class="manual-aba-badge">2 campos</span>
+              </summary>
+              <p class="manual-aba-intro">Casos que não retornaram a ligação.</p>
+              <dl class="manual-campos">
+                <dt>Status</dt><dd>Manutenção/instalação: o sistema marca <code>concluido</code> sozinho quando detecta. Remoção: preencha manualmente.</dd>
+                <dt>Observação Puma</dt><dd>Anotação livre sobre o andamento.</dd>
+              </dl>
+            </details>
 
-      <div class="legenda">
-        <div class="item"><span class="selo selo-ocioso">Ocioso</span> nunca rodou / esperando</div>
-        <div class="item"><span class="selo selo-rodando">Rodando</span> em execução agora</div>
-        <div class="item"><span class="selo selo-sucesso">Sucesso</span> concluída sem erro</div>
-        <div class="item"><span class="selo selo-erro">Erro</span> falhou, ver mensagem</div>
-        <div class="item"><span class="selo selo-aguardando_reconexao">Aguardando você</span> sessão caiu, precisa relogar</div>
+            <details class="manual-aba">
+              <summary>
+                <span class="manual-aba-titulo">Alertas</span>
+                <span class="manual-aba-badge">2 campos</span>
+              </summary>
+              <p class="manual-aba-intro">Respostas do associado que o sistema detecta, mas não sabe resolver sozinho.</p>
+              <dl class="manual-campos">
+                <dt>Ação</dt><dd>Só pra "Retorno tardio": <strong>Confirma conclusão</strong> (finaliza sozinho onde a pendência estiver) ou <strong>Foi engano, ignorar</strong>.</dd>
+                <dt>Data Agendada</dt><dd>Só pra "Agendado sem data": preencha a data combinada com o associado.</dd>
+              </dl>
+            </details>
+          </div>
+        </section>
+
+        <section class="manual-secao" id="manual-fases">
+          <h2><span class="ic">▣</span> Fases da automação</h2>
+          <p>
+            A aba "Fases da Automação" roda as etapas do robô: baixar os
+            relatórios do Track N'Me, rodar o motor de regras, consultar o
+            SGA, publicar a fila em Tratativas, disparar WhatsApp e escalonar
+            pra ligação. <strong>Executar selecionadas</strong> roda só as
+            etapas marcadas; <strong>Executar tudo</strong> roda a esteira
+            inteira em sequência; <strong>Cancelar</strong> interrompe uma
+            execução em andamento.
+          </p>
+          <p class="texto-muted">Cada etapa mostra um selo de status:</p>
+          <div class="legenda">
+            <div class="item"><span class="selo selo-ocioso">Ocioso</span> nunca rodou / esperando</div>
+            <div class="item"><span class="selo selo-rodando">Rodando</span> em execução agora</div>
+            <div class="item"><span class="selo selo-sucesso">Sucesso</span> concluída sem erro</div>
+            <div class="item"><span class="selo selo-erro">Erro</span> falhou, ver mensagem</div>
+            <div class="item"><span class="selo selo-aguardando_reconexao">Aguardando você</span> sessão caiu, precisa relogar</div>
+          </div>
+        </section>
+
+        <section class="manual-secao" id="manual-avisos">
+          <h2><span class="ic">⚠</span> Avisos importantes</h2>
+          <div class="callout callout-atencao">
+            <strong>Situação Manual não tira a linha da aba.</strong> Ela só
+            pausa a esteira automática. Se o caso realmente terminou, marque
+            <strong>Finalizado</strong> também — são duas ações
+            independentes.
+          </div>
+          <div class="callout callout-atencao">
+            <strong>Não ordene a aba Tratativas pra reorganizar as
+            linhas</strong> — o sistema reescreve a aba inteira a cada
+            execução, e a ordem se perde no próximo ciclo. Prefira usar um
+            <strong>filtro</strong> (ícone de funil do Google Sheets).
+          </div>
+          <div class="callout callout-atencao">
+            <strong>Nunca edite a coluna <code>ID (hash)</code>.</strong> É
+            assim que o sistema reconhece que uma linha é a mesma pendência de
+            ontem — mudar esse valor faz o sistema achar que é uma pendência
+            nova.
+          </div>
+        </section>
       </div>
 
       <footer class="rodape-creditos">

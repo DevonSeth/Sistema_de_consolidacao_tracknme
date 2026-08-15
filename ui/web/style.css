@@ -108,7 +108,7 @@ body {
 }
 .app-shell { display: flex; min-height: 100vh; }
 
-/* ---------- Sidebar (mínima — só "Operação", decisão já fechada) ---------- */
+/* ---------- Sidebar (3 itens: Fases da Automação / Dashboard / Manual) ---------- */
 .sidebar {
   width: 200px;
   flex-shrink: 0;
@@ -159,7 +159,7 @@ body {
   font-size: 13.5px;
   font-family: inherit;
   text-align: left;
-  cursor: default;
+  cursor: pointer;
   width: 100%;
   border-left: 2px solid transparent;
 }
@@ -482,3 +482,141 @@ body {
 }
 .legenda .item { display: flex; align-items: center; gap: 6px; }
 .legenda .selo { padding: 2px 8px; }
+
+/* ---------- Troca de seção (sidebar com 3 itens, sem router) ---------- */
+.content-section { display: none; }
+.content-section.active { display: block; }
+
+/* ---------- Manual (mesmo padrão visual do Manual do Sistema no Admin web) ---------- */
+.manual-nav {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  margin-bottom: 22px;
+}
+.manual-nav a {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12.5px; color: var(--text-muted); text-decoration: none;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px;
+  padding: 6px 12px;
+}
+.manual-nav a:hover { color: var(--text); border-color: var(--accent); }
+.manual-nav a .ic { font-size: 13px; }
+
+.manual-secao {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 18px 20px;
+  margin-bottom: 16px;
+  scroll-margin-top: 16px;
+}
+.manual-secao h2 {
+  font-size: 15.5px; font-weight: 650; margin: 0 0 10px;
+  display: flex; align-items: center; gap: 8px;
+}
+.manual-secao h2 .ic { font-size: 15px; }
+.manual-secao p { font-size: 13px; line-height: 1.6; margin: 0 0 10px; }
+.manual-secao p:last-child { margin-bottom: 0; }
+.manual-secao .texto-muted { color: var(--text-muted); }
+.manual-secao code {
+  font-family: var(--font-mono); font-size: 12px;
+  background: var(--surface-2); border-radius: 4px; padding: 1px 5px;
+}
+
+/* Accordion por aba (Como alimentar a planilha) — 1 aba aberta por vez
+   reduz a carga visual; campo/descrição em lista, não parágrafo corrido. */
+.manual-abas { display: flex; flex-direction: column; gap: 10px; }
+.manual-aba {
+  background: var(--surface-2);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.manual-aba summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px;
+  font-size: 13.5px;
+}
+.manual-aba summary::-webkit-details-marker { display: none; }
+.manual-aba summary::before {
+  content: "▸";
+  color: var(--text-muted);
+  font-size: 11px;
+  transition: transform 0.15s ease;
+}
+.manual-aba[open] summary::before { transform: rotate(90deg); }
+.manual-aba-titulo { font-weight: 650; }
+.manual-aba-badge {
+  font-size: 11px; font-weight: 500; color: var(--text-muted);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 9px; margin-left: auto;
+}
+.manual-aba-intro { padding: 0 16px; margin: 0 0 10px; font-size: 12.5px; color: var(--text-muted); }
+
+.manual-campos {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  column-gap: 14px;
+  margin: 0;
+  padding: 0 16px 14px;
+}
+.manual-campos dt {
+  font-family: var(--font-mono); font-size: 11px; font-weight: 700;
+  color: var(--accent);
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.manual-campos dd {
+  margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text);
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+.manual-campos dt:first-of-type, .manual-campos dd:first-of-type { border-top: none; }
+.manual-campos dd code, .manual-aba .callout code {
+  font-family: var(--font-mono); font-size: 11px;
+  background: var(--surface); border-radius: 4px; padding: 1px 5px;
+}
+.manual-aba .callout { margin: 10px 16px 14px; }
+
+.callout {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-wash);
+  border-radius: 0 8px 8px 0;
+  padding: 10px 14px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.callout:last-child { margin-bottom: 0; }
+.callout-atencao {
+  border-left-color: var(--nivel-3);
+  background: var(--status-aguardando-bg);
+}
+
+.swatch {
+  display: inline-block; width: 12px; height: 12px; border-radius: 3px;
+  vertical-align: middle; margin-right: 2px;
+}
+.swatch-sistema { background: var(--sidebar-bg); }
+.swatch-humano { background: var(--accent); }
+
+.manual-steps {
+  list-style: none; counter-reset: manual-passo;
+  margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.manual-steps li {
+  counter-increment: manual-passo;
+  display: flex; align-items: baseline; gap: 10px;
+  font-size: 13px; line-height: 1.55;
+}
+.manual-steps li::before {
+  content: counter(manual-passo);
+  flex-shrink: 0;
+  width: 20px; height: 20px;
+  border-radius: 999px;
+  background: var(--accent); color: var(--accent-ink);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; font-family: var(--font-mono);
+}

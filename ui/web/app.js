@@ -686,10 +686,27 @@ async function carregarWatchdog() {
 }
 
 // --------------------------------------------------------------------------
+// Troca de seção (sidebar com 3 itens — Fases da Automação / Dashboard / Manual)
+// --------------------------------------------------------------------------
+
+function mostrarSecao(nome) {
+  document.querySelectorAll(".content-section").forEach((el) =>
+    el.classList.toggle("active", el.dataset.section === nome)
+  );
+  document.querySelectorAll(".nav-item[data-section]").forEach((el) =>
+    el.classList.toggle("active", el.dataset.section === nome)
+  );
+}
+
+// --------------------------------------------------------------------------
 // Wiring inicial
 // --------------------------------------------------------------------------
 
 function init() {
+  document.querySelectorAll(".nav-item[data-section]").forEach((btn) =>
+    btn.addEventListener("click", () => mostrarSecao(btn.dataset.section))
+  );
+
   document.getElementById("btn-executar-selecionadas").addEventListener("click", () => {
     if (selecionadas.size === 0) {
       alert("Selecione ao menos uma etapa.");
