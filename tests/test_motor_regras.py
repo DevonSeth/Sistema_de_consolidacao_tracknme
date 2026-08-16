@@ -833,6 +833,16 @@ class TestAplicarSituacoesSga:
         assert enriquecida["cidade"] == "Recife"
         assert enriquecida["bairro"] == "Boa Vista"
 
+    def test_encontrado_via_e_repassado_pra_linha_enriquecida(self):
+        linha_g3 = self._linha("CHASSI-007")
+        resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [], "grupo_3_tratativa_humana": [linha_g3]}
+
+        final = aplicar_situacoes_sga(
+            resultado, {"CHASSI-007": {"status": "ATIVO", "encontrado_via": "placa"}}, self.TEMPLATES
+        )
+
+        assert final["grupo_3_tratativa_humana"][0]["encontrado_via"] == "placa"
+
     def test_status_inativo_forca_fechamento_mesmo_vindo_do_grupo_3(self):
         linha_g3 = self._linha("CHASSI-002", codigo_regra="REGRA_1")
         resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [], "grupo_3_tratativa_humana": [linha_g3]}

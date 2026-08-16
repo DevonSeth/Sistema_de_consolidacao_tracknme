@@ -817,8 +817,11 @@ async def test_etapa_fechar_incidentes_automaticos_falha_ao_abrir_navegador(monk
 _INSTALACAO_REMOCAO_FAKE = [{"Chassi": "chassi-ir-1", "Serviço": "Instalação"}]
 
 
-def _atualizar_situacao_sga_fake(chassi, status_novo, anterior, agora):
-    return {"chassi": chassi, "status": status_novo, "desde": agora, "atualizado_em": agora}
+def _atualizar_situacao_sga_fake(chassi, status_novo, anterior, agora, encontrado_via=None):
+    return {
+        "chassi": chassi, "status": status_novo, "desde": agora, "atualizado_em": agora,
+        "encontrado_via": encontrado_via,
+    }
 
 
 def _preparar_mocks_sga(monkeypatch):
@@ -832,6 +835,7 @@ def _preparar_mocks_sga(monkeypatch):
     monkeypatch.setattr(orch.sga_bot, "aguardar_login_manual", _aguardar_login_manual_fake)
     monkeypatch.setattr(orch.supabase_client, "buscar_situacao_veiculo_sga", lambda chassi: None)
     monkeypatch.setattr(orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: None)
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
     monkeypatch.setattr(
         orch.motor_regras_instalacao_remocao, "atualizar_situacao_sga", _atualizar_situacao_sga_fake
     )
@@ -843,9 +847,9 @@ async def test_etapa_enriquecimento_sga_sucesso_consulta_uniao_de_chassis(monkey
     contexto, browser = _preparar_mocks_sga(monkeypatch)
     chassis_consultados = []
 
-    async def _consultar_situacao_fake(page, chassi):
+    async def _consultar_situacao_fake(page, chassi, placa=None):
         chassis_consultados.append(chassi)
-        return {"status": "ATIVO", "cidade": "Recife", "bairro": "Boa Vista"}
+        return {"status": "ATIVO", "cidade": "Recife", "bairro": "Boa Vista", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
 
@@ -868,10 +872,10 @@ async def test_etapa_enriquecimento_sga_sucesso_consulta_uniao_de_chassis(monkey
 async def test_etapa_enriquecimento_sga_ignora_chassi_com_falha_de_consulta(monkeypatch):
     _preparar_mocks_sga(monkeypatch)
 
-    async def _consultar_situacao_fake(page, chassi):
+    async def _consultar_situacao_fake(page, chassi, placa=None):
         if chassi == "X1":
             raise RuntimeError("Status do veículo não carregou")
-        return {"status": "INATIVO", "cidade": "", "bairro": ""}
+        return {"status": "INATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
 
@@ -892,8 +896,8 @@ async def test_etapa_enriquecimento_sga_ignora_chassi_com_falha_de_consulta(monk
 async def test_etapa_enriquecimento_sga_repassa_on_worker_status(monkeypatch):
     _preparar_mocks_sga(monkeypatch)
 
-    async def _consultar_situacao_fake(page, chassi):
-        return {"status": "ATIVO", "cidade": "", "bairro": ""}
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
     chamadas = []
@@ -915,8 +919,8 @@ async def test_etapa_enriquecimento_sga_repassa_on_worker_status(monkeypatch):
 async def test_etapa_enriquecimento_sga_repassa_on_progresso(monkeypatch):
     _preparar_mocks_sga(monkeypatch)
 
-    async def _consultar_situacao_fake(page, chassi):
-        return {"status": "ATIVO", "cidade": "", "bairro": ""}
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
     chamadas_progresso = []
@@ -934,8 +938,8 @@ async def test_etapa_enriquecimento_sga_repassa_on_progresso(monkeypatch):
 async def test_etapa_enriquecimento_sga_dados_none_usa_motor_de_regras_e_le_instalacao_remocao(monkeypatch):
     _preparar_mocks_sga(monkeypatch)
 
-    async def _consultar_situacao_fake(page, chassi):
-        return {"status": "ATIVO", "cidade": "", "bairro": ""}
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
 
@@ -1056,9 +1060,9 @@ async def test_etapa_enriquecimento_sga_chassis_override_ignora_defaults(monkeyp
 
     chassis_consultados = []
 
-    async def _consultar_situacao_fake(page, chassi):
+    async def _consultar_situacao_fake(page, chassi, placa=None):
         chassis_consultados.append(chassi)
-        return {"status": "ATIVO", "cidade": "", "bairro": ""}
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
 
     monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
 
@@ -1071,6 +1075,7 @@ async def test_etapa_enriquecimento_sga_chassis_override_ignora_defaults(monkeyp
 @pytest.mark.asyncio
 async def test_etapa_enriquecimento_sga_falha_ao_abrir_navegador(monkeypatch):
     monkeypatch.setattr(orch, "async_playwright", lambda: _PlaywrightCtxFalso())
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
 
     async def _aguardar_login_manual_falha(playwright):
         raise RuntimeError("Login manual não confirmado a tempo")
@@ -1081,6 +1086,68 @@ async def test_etapa_enriquecimento_sga_falha_ao_abrir_navegador(monkeypatch):
 
     assert resultado.sucesso is False
     assert resultado.mensagem == "Login manual não confirmado a tempo"
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_repassa_placa_conhecida_por_identificador(monkeypatch):
+    # Achado 2026-08-16: a busca por Chassi no SGA nunca acha nada quando o
+    # identificador é um fallback (IMEI/placa) — por isso a placa conhecida
+    # de cada identificador (grupos de Manutenção + Instalação-Remoção)
+    # precisa chegar até `sga_bot.consultar_situacao`.
+    _preparar_mocks_sga(monkeypatch)
+    placas_recebidas = {}
+
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        placas_recebidas[chassi] = placa
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    instalacao_remocao = [{"Chassi": "chassi-ir-1", "Serviço": "Instalação", "Placa": "ghi9012"}]
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, instalacao_remocao)
+
+    assert resultado.sucesso is True
+    # X1/X2 vêm de _GRUPO_1_ABRIR_FAKE/_GRUPO_2_CONCLUIR_FAKE (placas ABC1234/DEF5678).
+    assert placas_recebidas["X1"] == "ABC1234"
+    assert placas_recebidas["X2"] == "DEF5678"
+    assert placas_recebidas["CHASSI-IR-1"] == "GHI9012"
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_placa_generica_nao_entra_no_mapa(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {"placas_genericas": "SEM PLACA"})
+    placas_recebidas = {}
+
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        placas_recebidas[chassi] = placa
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    grupo_1 = [{"placa": "SEM PLACA", "chassi": "X1", "imei": "111", "cliente": "Fulano"}]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1}
+    resultado = await orch.etapa_enriquecimento_sga(dados, [])
+
+    assert resultado.sucesso is True
+    assert placas_recebidas["X1"] is None
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_inclui_mapa_placas_no_resultado(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+
+    async def _consultar_situacao_fake(page, chassi, placa=None):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": "chassi"}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    # dados["mapa_placas"] é repassado só pra retomar_etapa reaproveitar
+    # na retomada pós-reconexão, sem recalcular dados_classificacao do zero.
+    assert resultado.dados["mapa_placas"] == {"X1": "ABC1234", "X2": "DEF5678"}
 
 
 # --- etapa_consolidar_com_sga -----------------------------------------------

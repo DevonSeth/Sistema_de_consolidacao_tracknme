@@ -86,6 +86,7 @@ from core.constants import (
     STATUS_PENDENTE,
     STATUS_RESPONDIDO,
 )
+from core.normalizacao import normalizar_placa
 from config import manager
 from integrations import google_sheets_client, newmo_client, playwright_utils, sga_bot, supabase_client, tracknme_bot
 
@@ -495,25 +496,74 @@ def _chassis_para_consultar_sga(dados_classificacao: dict, instalacao_remocao: l
     return sorted(chassis)
 
 
+def _placas_genericas(parametros: dict) -> list[str]:
+    """Mesmo split de `system_parameters.placas_genericas` (texto CSV) já
+    feito em `core.motor_regras._placas_genericas`/`integrations.
+    supabase_client` — duplicado aqui de propósito (função privada de
+    outro módulo, não é pra importar através da linha de underscore)."""
+    valor = parametros.get("placas_genericas", "")
+    if isinstance(valor, list):
+        return valor
+    return [item.strip() for item in str(valor).split(",") if item.strip()]
+
+
+def _mapa_placas_por_identificador(
+    dados_classificacao: dict, instalacao_remocao: list[dict], parametros: dict
+) -> dict[str, str]:
+    """Identificador (chassi/IMEI/placa-fallback, upper — mesma chave usada
+    em `_chassis_para_consultar_sga`) -> placa normalizada conhecida do
+    veículo. Usado como 2ª tentativa de busca no SGA quando a busca por
+    Chassi não encontrar nada (achado 2026-08-16: `core.motor_regras.
+    _resolver_chassi` às vezes usa o IMEI ou a própria placa como
+    identificador, e a busca por Chassi nunca acha esses casos, mesmo
+    quando o SGA acharia buscando por Placa). Só entra no mapa quando a
+    placa normaliza pra um valor válido (não vazia, não genérica) — mesma
+    normalização usada no resto do motor de regras."""
+    genericas = _placas_genericas(parametros)
+    mapa: dict[str, str] = {}
+    for linha in (
+        dados_classificacao["grupo_1_abrir"]
+        + dados_classificacao["grupo_2_concluir"]
+        + dados_classificacao["grupo_3_tratativa_humana"]
+    ):
+        chassi = (linha.get("chassi") or "").strip().upper()
+        placa = normalizar_placa(linha.get("placa", ""), genericas)
+        if chassi and placa:
+            mapa.setdefault(chassi, placa)
+    for registro in instalacao_remocao:
+        chassi = (registro.get("Chassi") or "").strip().upper()
+        placa = normalizar_placa(registro.get("Placa", ""), genericas)
+        if chassi and placa:
+            mapa.setdefault(chassi, placa)
+    return mapa
+
+
 def _persistir_situacoes_sga(resultados: list, agora: datetime) -> dict:
     """Persiste em `situacao_veiculo_sga` cada chassi com resultado bem
-    sucedido e devolve `{chassi: {status, desde, cidade, bairro}}` —
-    corpo compartilhado entre o caminho normal e o de reconexão parcial
-    de `etapa_enriquecimento_sga` (mesmo trabalho, chassis diferentes)."""
+    sucedido e devolve `{chassi: {status, desde, cidade, bairro,
+    encontrado_via}}` — corpo compartilhado entre o caminho normal e o de
+    reconexão parcial de `etapa_enriquecimento_sga` (mesmo trabalho,
+    chassis diferentes). `encontrado_via` ("chassi"/"placa", ver
+    `integrations.sga_bot.consultar_situacao`) é só repassado, não afeta
+    `desde`."""
     situacoes_sga = {}
     for r in resultados:
         if not r.sucesso:
             continue
         chassi = r.item
         status_novo = r.resultado["status"]
+        encontrado_via = r.resultado.get("encontrado_via")
         anterior = supabase_client.buscar_situacao_veiculo_sga(chassi)
-        atualizado = motor_regras_instalacao_remocao.atualizar_situacao_sga(chassi, status_novo, anterior, agora)
+        atualizado = motor_regras_instalacao_remocao.atualizar_situacao_sga(
+            chassi, status_novo, anterior, agora, encontrado_via=encontrado_via
+        )
         supabase_client.upsert_situacao_veiculo_sga(atualizado)
         situacoes_sga[chassi] = {
             "status": atualizado["status"],
             "desde": atualizado["desde"],
             "cidade": r.resultado["cidade"],
             "bairro": r.resultado["bairro"],
+            "encontrado_via": encontrado_via,
         }
     return situacoes_sga
 
@@ -522,6 +572,7 @@ async def etapa_enriquecimento_sga(
     dados_classificacao: dict | None = None,
     instalacao_remocao: list[dict] | None = None,
     chassis_override: list[str] | None = None,
+    mapa_placas_override: dict[str, str] | None = None,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_worker_status: Callable[[int, str], None] | None = None,
@@ -530,23 +581,26 @@ async def etapa_enriquecimento_sga(
     Instalação e Remoção numa consulta só, decisão do usuário: `dados_
     classificacao` (default: `etapa_motor_de_regras()`) dá os chassis de
     Manutenção; `instalacao_remocao` (default: `ler_aba(...)`) dá os
-    chassis de Instalação/Remoção. `chassis_override` (usado só na
-    retomada depois de uma reconexão manual) ignora os dois defaults
-    caros e consulta só os chassis informados — nunca rechama
-    `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho.
+    chassis de Instalação/Remoção. `chassis_override`/`mapa_placas_
+    override` (usados só na retomada depois de uma reconexão manual)
+    ignoram os dois defaults caros e consultam só os chassis informados —
+    nunca rechama `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho.
 
-    Pra cada chassi: consulta o SGA ao vivo, lê o registro anterior de
-    `situacao_veiculo_sga` (Supabase), recalcula com `core.motor_regras_
-    instalacao_remocao.atualizar_situacao_sga` (pura — decide se `desde`
-    reinicia) e persiste de volta. Devolve um dict só,
-    `situacoes_sga` ({chassi: {status, desde, cidade, bairro}}) —
-    reaproveitado tanto por `core.motor_regras.aplicar_situacoes_sga`
-    (Manutenção, usa status/cidade/bairro) quanto por
-    `core.motor_regras_instalacao_remocao.classificar_instalacao_remocao`
-    (usa status/desde pro gating de remoção). Antes desta sessão
-    (2026-08-07) essa etapa produzia dois dicts em paralelo e descartava
-    `cidade`/`bairro` do retorno de `sga_bot.consultar_situacao` — bug
-    corrigido junto com a unificação.
+    Pra cada chassi: consulta o SGA ao vivo (tentando também pela Placa
+    quando a busca por Chassi não encontra nada — achado 2026-08-16, ver
+    `integrations.sga_bot.consultar_situacao` — `mapa_placas` dá a placa
+    conhecida de cada identificador, construída por `_mapa_placas_por_
+    identificador`), lê o registro anterior de `situacao_veiculo_sga`
+    (Supabase), recalcula com `core.motor_regras_instalacao_remocao.
+    atualizar_situacao_sga` (pura — decide se `desde` reinicia) e persiste
+    de volta. Devolve um dict só, `situacoes_sga` ({chassi: {status,
+    desde, cidade, bairro, encontrado_via}}) — reaproveitado tanto por
+    `core.motor_regras.aplicar_situacoes_sga` (Manutenção, usa status/
+    cidade/bairro) quanto por `core.motor_regras_instalacao_remocao.
+    classificar_instalacao_remocao` (usa status/desde pro gating de
+    remoção). Antes desta sessão (2026-08-07) essa etapa produzia dois
+    dicts em paralelo e descartava `cidade`/`bairro` do retorno de
+    `sga_bot.consultar_situacao` — bug corrigido junto com a unificação.
 
     Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`),
     os chassis que já tinham resultado ANTES da queda são persistidos
@@ -556,10 +610,14 @@ async def etapa_enriquecimento_sga(
     cada worker está consultando agora. `dados["falhas"]` lista os
     chassis que não tiveram sucesso na consulta (antes descartados
     silenciosamente por `_persistir_situacoes_sga`, que só grava quem
-    teve sucesso).
+    teve sucesso). `dados["mapa_placas"]` é sempre incluído (mesmo nos 2
+    desfechos de interrupção) só pra `orchestrator.catalogo_etapas.
+    retomar_etapa` repassar como `mapa_placas_override` na retomada, sem
+    precisar recalcular `dados_classificacao` do zero.
     """
     if chassis_override is not None:
         chassis = chassis_override
+        mapa_placas = mapa_placas_override or {}
     else:
         if dados_classificacao is None:
             resultado_motor = etapa_motor_de_regras()
@@ -571,17 +629,22 @@ async def etapa_enriquecimento_sga(
                 google_sheets_client.NOME_PLANILHA_ADMINISTRADOR, "Instalação-Remoção"
             )
         chassis = _chassis_para_consultar_sga(dados_classificacao, instalacao_remocao)
+        parametros = supabase_client.buscar_parametros()
+        mapa_placas = _mapa_placas_por_identificador(dados_classificacao, instalacao_remocao, parametros)
 
     on_item_iniciado = None
     if on_worker_status is not None:
         on_item_iniciado = lambda worker_id, chassi: on_worker_status(worker_id, _descrever_chassi_sga(chassi))  # noqa: E731
+
+    async def _consultar_com_fallback_placa(page, chassi):
+        return await sga_bot.consultar_situacao(page, chassi, placa=mapa_placas.get(chassi))
 
     try:
         async with async_playwright() as playwright:
             browser, context = await sga_bot.aguardar_login_manual(playwright)
             try:
                 resultados = await playwright_utils.processar_fila(
-                    context, chassis, sga_bot.consultar_situacao,
+                    context, chassis, _consultar_com_fallback_placa,
                     on_progresso=on_progresso, cancelar_checker=cancelar_checker,
                     on_item_iniciado=on_item_iniciado,
                 )
@@ -598,6 +661,7 @@ async def etapa_enriquecimento_sga(
             dados={
                 "situacoes_sga": situacoes_sga,
                 "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+                "mapa_placas": mapa_placas,
             },
             aguardando_reconexao={"pendentes": e.pendentes},
         )
@@ -610,6 +674,7 @@ async def etapa_enriquecimento_sga(
             dados={
                 "situacoes_sga": situacoes_sga,
                 "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+                "mapa_placas": mapa_placas,
             },
             cancelado={"pendentes": e.pendentes},
         )
@@ -623,6 +688,7 @@ async def etapa_enriquecimento_sga(
         dados={
             "situacoes_sga": situacoes_sga,
             "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga),
+            "mapa_placas": mapa_placas,
         },
     )
 

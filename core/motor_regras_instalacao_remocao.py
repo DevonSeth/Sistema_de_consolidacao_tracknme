@@ -400,16 +400,24 @@ def _montar_linha_divergencia(registro: dict, equipamento: dict | None, template
 
 
 def atualizar_situacao_sga(chassi: str, status_novo: str, registro_anterior: dict | None,
-                            agora: datetime) -> dict:
+                            agora: datetime, encontrado_via: str | None = None) -> dict:
     """Transformação pura pra manter `situacao_veiculo_sga` (Supabase):
     se o status mudou (ou não havia registro), `desde` reinicia agora;
     se é o mesmo status de antes, `desde` não muda, só `atualizado_em`.
     Não faz I/O — quem lê/grava no Supabase é o orchestrator, ainda não
-    implementado."""
+    implementado.
+
+    `encontrado_via` ("chassi"/"placa", opcional -- ver
+    `integrations.sga_bot.consultar_situacao`) é só repassado pro registro
+    persistido, sem influenciar `desde` -- diagnóstico de eficiência do
+    SGA, não faz parte da regra de negócio."""
     status_anterior = registro_anterior.get("status") if registro_anterior else None
     desde_anterior = registro_anterior.get("desde") if registro_anterior else None
     desde = agora if (status_anterior != status_novo or desde_anterior is None) else desde_anterior
-    return {"chassi": chassi, "status": status_novo, "desde": desde, "atualizado_em": agora}
+    return {
+        "chassi": chassi, "status": status_novo, "desde": desde, "atualizado_em": agora,
+        "encontrado_via": encontrado_via,
+    }
 
 
 def classificar_instalacao_remocao(registros: list[dict], equipamentos: list[dict],

@@ -298,7 +298,15 @@ class TestAtualizarSituacaoSga:
 
     def test_sem_registro_anterior_comeca_a_contagem_agora(self):
         resultado = atualizar_situacao_sga("CHASSI-001", "INATIVO", None, self.AGORA)
-        assert resultado == {"chassi": "CHASSI-001", "status": "INATIVO", "desde": self.AGORA, "atualizado_em": self.AGORA}
+        assert resultado == {
+            "chassi": "CHASSI-001", "status": "INATIVO", "desde": self.AGORA,
+            "atualizado_em": self.AGORA, "encontrado_via": None,
+        }
+
+    def test_encontrado_via_e_repassado_sem_afetar_desde(self):
+        resultado = atualizar_situacao_sga("CHASSI-001", "INATIVO", None, self.AGORA, encontrado_via="placa")
+        assert resultado["encontrado_via"] == "placa"
+        assert resultado["desde"] == self.AGORA
 
     def test_status_mudou_reinicia_a_contagem(self):
         anterior = {"status": "ATIVO", "desde": datetime(2026, 1, 1)}

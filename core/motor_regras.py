@@ -764,6 +764,7 @@ def aplicar_situacoes_sga(resultado: dict, situacoes_sga: dict[str, dict], templ
             "sga": status,
             "cidade": info_sga.get("cidade", ""),
             "bairro": info_sga.get("bairro", ""),
+            "encontrado_via": info_sga.get("encontrado_via"),
         }
         if status == STATUS_SGA_ATIVO:
             (grupo_2 if grupo_original == "grupo_2_concluir" else grupo_3).append(linha_com_sga)
