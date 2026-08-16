@@ -418,7 +418,7 @@ class IncidenteDuplicadoError(RuntimeError):
     incidente", só fecha o modal e volta pro painel do veículo). Ainda
     assim é um cenário que NÃO deveria acontecer em uso normal -- o motor
     de regras só chama `abrir_incidente` pra placas sem incidente aberto
-    (ver `prompt_claude_code.md`) -- então tratar como falha normal de
+    (ver `docs/prompt_claude_code.md`) -- então tratar como falha normal de
     item (retry 2 rounds + sinalizar pro atendente, decisão #8), não como
     `SessaoCaidaError`."""
 
