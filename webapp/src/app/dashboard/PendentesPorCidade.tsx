@@ -2,11 +2,15 @@
 
 import { useState, type ReactNode } from "react";
 
+import InfoTooltip from "./InfoTooltip";
+
 export default function PendentesPorCidade({
   dados,
+  descricao,
   rodape,
 }: {
   dados: { cidade: string; quantidade: number }[];
+  descricao?: string;
   rodape?: ReactNode;
 }) {
   const [busca, setBusca] = useState("");
@@ -15,7 +19,10 @@ export default function PendentesPorCidade({
 
   return (
     <div className="painel-db">
-      <h2>Serviços pendentes por cidade</h2>
+      <h2>
+        Serviços pendentes por cidade
+        {descricao && <InfoTooltip texto={descricao} label="Serviços pendentes por cidade" />}
+      </h2>
       <div className="desc">
         {dados.length} cidades · {total} pendências agora — ordem alfabética
       </div>

@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 import {
   buscarDistribuicaoUrgencia,
+  buscarEncaminhadasParaPuma,
   buscarEvolucaoBacklog,
   buscarMetricas,
   buscarPendenciasSemContato,
@@ -11,14 +12,16 @@ import {
   dataDefaultDesde,
   hojeISO,
 } from "@/lib/dashboard-metrics";
-import { METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
+import { descricaoMetrica, METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
 
 import BotaoImprimir from "./BotaoImprimir";
 import CabecalhoImpressao from "./CabecalhoImpressao";
 import DistribuicaoUrgencia from "./DistribuicaoUrgencia";
+import EncaminhadasParaPuma from "./EncaminhadasParaPuma";
 import EstadoPorOrigem from "./EstadoPorOrigem";
 import EvolucaoBacklog from "./EvolucaoBacklog";
+import InfoTooltip from "./InfoTooltip";
 import PendenciasSemContato from "./PendenciasSemContato";
 import PendentesPorCidade from "./PendentesPorCidade";
 import PendentesPorTipo from "./PendentesPorTipo";
@@ -33,6 +36,7 @@ const CHAVES_PAINEL_CUSTOM = new Set([
   "pendencias_sem_contato",
   "pendentes_por_cidade",
   "evolucao_backlog",
+  "encaminhar_puma_tabela",
 ]);
 
 export const metadata = {
@@ -60,6 +64,7 @@ export default async function DashboardPage({
   const pendenciasSemContato = visiveis.has("pendencias_sem_contato") ? await buscarPendenciasSemContato() : null;
   const pendentesPorCidade = visiveis.has("pendentes_por_cidade") ? await buscarPendentesPorCidade() : null;
   const evolucaoBacklog = visiveis.has("evolucao_backlog") ? await buscarEvolucaoBacklog() : null;
+  const encaminhadasParaPuma = visiveis.has("encaminhar_puma_tabela") ? await buscarEncaminhadasParaPuma() : null;
   const ultimaAtualizacao = await buscarUltimaAtualizacao();
 
   // Painel custom de cada chave, já resolvido (ou null se não visível) —
@@ -70,29 +75,40 @@ export default async function DashboardPage({
     ? {
         tendencia_diaria: serieDiaria && (
           <div className="full" key="tendencia_diaria">
-            <TendenciaDiaria serie={serieDiaria} />
+            <TendenciaDiaria serie={serieDiaria} descricao={descricaoMetrica("tendencia_diaria")} />
           </div>
         ),
-        estado_por_origem: visiveis.has("estado_por_origem") && <EstadoPorOrigem key="estado_por_origem" metricas={metricas} />,
+        estado_por_origem: visiveis.has("estado_por_origem") && (
+          <EstadoPorOrigem key="estado_por_origem" metricas={metricas} descricao={descricaoMetrica("estado_por_origem")} />
+        ),
         pendentes_por_tipo: visiveis.has("pendentes_por_tipo") && (
-          <PendentesPorTipo key="pendentes_por_tipo" metricas={metricas} />
+          <PendentesPorTipo key="pendentes_por_tipo" metricas={metricas} descricao={descricaoMetrica("pendentes_por_tipo")} />
         ),
         distribuicao_urgencia: distribuicaoUrgencia && (
-          <DistribuicaoUrgencia key="distribuicao_urgencia" distribuicao={distribuicaoUrgencia} />
+          <DistribuicaoUrgencia
+            key="distribuicao_urgencia"
+            distribuicao={distribuicaoUrgencia}
+            descricao={descricaoMetrica("distribuicao_urgencia")}
+          />
         ),
         evolucao_backlog: evolucaoBacklog && (
           <div className="full" key="evolucao_backlog">
-            <EvolucaoBacklog serie={evolucaoBacklog} desde={desde} ate={ate} />
+            <EvolucaoBacklog serie={evolucaoBacklog} desde={desde} ate={ate} descricao={descricaoMetrica("evolucao_backlog")} />
           </div>
         ),
         pendencias_sem_contato: pendenciasSemContato && (
           <div className="full" key="pendencias_sem_contato">
-            <PendenciasSemContato dados={pendenciasSemContato} />
+            <PendenciasSemContato dados={pendenciasSemContato} descricao={descricaoMetrica("pendencias_sem_contato")} />
           </div>
         ),
         pendentes_por_cidade: pendentesPorCidade && (
           <div className="full" key="pendentes_por_cidade">
-            <PendentesPorCidade dados={pendentesPorCidade} />
+            <PendentesPorCidade dados={pendentesPorCidade} descricao={descricaoMetrica("pendentes_por_cidade")} />
+          </div>
+        ),
+        encaminhar_puma_tabela: encaminhadasParaPuma && (
+          <div className="full" key="encaminhar_puma_tabela">
+            <EncaminhadasParaPuma dados={encaminhadasParaPuma} descricao={descricaoMetrica("encaminhar_puma_tabela")} />
           </div>
         ),
       }
@@ -151,7 +167,10 @@ export default async function DashboardPage({
                 <div className="kpi-grid">
                   {kpis.map((m) => (
                     <div className="kpi" key={m.chave}>
-                      <div className="rotulo">{m.label}</div>
+                      <div className="rotulo">
+                        {m.label}
+                        {m.descricao && <InfoTooltip texto={m.descricao} label={m.label} />}
+                      </div>
                       <div className="valor">{valorMetrica(m.chave, metricas)}</div>
                     </div>
                   ))}

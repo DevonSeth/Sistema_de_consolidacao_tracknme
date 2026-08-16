@@ -354,6 +354,63 @@ export async function buscarPendenciasSemContato(limite = 20): Promise<Pendencia
     .slice(0, limite);
 }
 
+export type EncaminhadaParaPuma = {
+  identificador: string;
+  cliente: string;
+  origem: string;
+  cidade: string;
+  motivo: string;
+  diasNoEstado: number;
+  nivelUrgencia: number | null;
+};
+
+/** Pendências com `tratativas.status='encaminhado_puma'` que ainda não
+ * foram concluídas pela Puma — mesma exclusão de `buscarAbertasAgora`,
+ * garante que o total bate com o widget `encaminhadas_puma`. "Dias no
+ * estado" usa a mesma aproximação de dias úteis de `diasSemContato`, mas
+ * a partir de `puma_encaminhamentos.data_encaminhamento` da linha MAIS
+ * RECENTE de cada tratativa (re-encaminhamento é suportado no schema —
+ * uma tratativa pode ter mais de uma linha em `puma_encaminhamentos`).
+ * Sem limite de linhas (o widget mostra o total, a tabela mostra tudo —
+ * limitar aqui criaria "widget diz N, tabela mostra menos"). */
+export async function buscarEncaminhadasParaPuma(): Promise<EncaminhadaParaPuma[]> {
+  const supabase = createSupabaseServiceClient();
+  const [abertas, urgenciaPorRegra] = await Promise.all([buscarAbertasAgora(supabase), buscarUrgenciaPorRegra(supabase)]);
+  const encaminhadas = abertas.filter((t) => t.status === "encaminhado_puma");
+  if (encaminhadas.length === 0) return [];
+
+  const ids = encaminhadas.map((t) => t.id);
+  const { data: encaminhamentos, error } = await supabase
+    .from("puma_encaminhamentos")
+    .select("tratativa_id, motivo, data_encaminhamento")
+    .in("tratativa_id", ids)
+    .order("data_encaminhamento", { ascending: false });
+  if (error) throw new Error(error.message);
+
+  // Ordenado desc — a 1ª ocorrência de cada tratativa_id já é a mais recente.
+  const maisRecentePorId = new Map<string, { motivo: string | null; data_encaminhamento: string }>();
+  for (const e of encaminhamentos ?? []) {
+    if (!maisRecentePorId.has(e.tratativa_id)) maisRecentePorId.set(e.tratativa_id, e);
+  }
+
+  const agora = new Date();
+  return encaminhadas
+    .map((t) => {
+      const enc = maisRecentePorId.get(t.id);
+      const dataEncaminhamento = enc?.data_encaminhamento ? new Date(enc.data_encaminhamento) : null;
+      return {
+        identificador: t.identificador || "—",
+        cliente: t.cliente || "—",
+        origem: t.origem ?? "",
+        cidade: t.cidade?.trim() || "Sem cidade cadastrada",
+        motivo: enc?.motivo || "—",
+        diasNoEstado: dataEncaminhamento ? diasUteisAproximados(dataEncaminhamento, agora) : 0,
+        nivelUrgencia: t.codigo_regra ? urgenciaPorRegra.get(t.codigo_regra) ?? null : null,
+      };
+    })
+    .sort((a, b) => b.diasNoEstado - a.diasNoEstado);
+}
+
 /** Serviços com `status='pendente'` agora, agrupados por cidade —
  * alfabética, sem limite (decisão do usuário — a UI rola internamente
  * em vez de limitar linhas). */

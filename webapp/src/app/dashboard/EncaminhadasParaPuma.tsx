@@ -2,7 +2,7 @@
 
 import { useState, type ReactNode } from "react";
 
-import type { PendenciaSemContato } from "@/lib/dashboard-metrics";
+import type { EncaminhadaParaPuma } from "@/lib/dashboard-metrics";
 
 import InfoTooltip from "./InfoTooltip";
 
@@ -20,12 +20,12 @@ const NIVEL_COR: Record<number, string> = {
   5: "var(--nivel-5)",
 };
 
-export default function PendenciasSemContato({
+export default function EncaminhadasParaPuma({
   dados,
   descricao,
   rodape,
 }: {
-  dados: PendenciaSemContato[];
+  dados: EncaminhadaParaPuma[];
   descricao?: string;
   rodape?: ReactNode;
 }) {
@@ -45,10 +45,12 @@ export default function PendenciasSemContato({
   return (
     <div className="painel-db">
       <h2>
-        Pendências com mais tempo sem contato
-        {descricao && <InfoTooltip texto={descricao} label="Pendências com mais tempo sem contato" />}
+        Encaminhadas pra Puma
+        {descricao && <InfoTooltip texto={descricao} label="Encaminhadas pra Puma" />}
       </h2>
-      <div className="desc">As {dados.length} mais paradas agora (dias úteis, aproximado) — não respeita o filtro de período</div>
+      <div className="desc">
+        {dados.length} aguardando ação da Puma agora — dias úteis desde o encaminhamento (aproximado), não respeita o filtro de período
+      </div>
 
       <div className="origem-check-row" style={{ marginBottom: 8 }}>
         {ORIGENS.map((o) => (
@@ -79,7 +81,8 @@ export default function PendenciasSemContato({
               <th>Identificador</th>
               <th>Origem</th>
               <th>Cidade</th>
-              <th style={{ textAlign: "right" }}>Dias sem contato</th>
+              <th>Motivo</th>
+              <th style={{ textAlign: "right" }}>Dias no estado</th>
               <th style={{ textAlign: "right" }}>Nível</th>
             </tr>
           </thead>
@@ -90,7 +93,10 @@ export default function PendenciasSemContato({
                 <td>{d.identificador}</td>
                 <td>{ORIGENS.find((o) => o.chave === d.origem)?.label ?? d.origem}</td>
                 <td>{d.cidade}</td>
-                <td style={{ textAlign: "right" }}>{d.diasSemContato}</td>
+                <td className="celula-motivo" title={d.motivo}>
+                  {d.motivo}
+                </td>
+                <td style={{ textAlign: "right" }}>{d.diasNoEstado}</td>
                 <td style={{ textAlign: "right" }}>
                   {d.nivelUrgencia != null ? (
                     <span className="dot" style={{ background: NIVEL_COR[d.nivelUrgencia], display: "inline-block" }} />
@@ -103,8 +109,8 @@ export default function PendenciasSemContato({
             ))}
             {filtrados.length === 0 && (
               <tr>
-                <td colSpan={6} className="linha-vazia">
-                  Nenhuma pendência encontrada.
+                <td colSpan={7} className="linha-vazia">
+                  Nenhuma pendência encaminhada pra Puma no momento.
                 </td>
               </tr>
             )}

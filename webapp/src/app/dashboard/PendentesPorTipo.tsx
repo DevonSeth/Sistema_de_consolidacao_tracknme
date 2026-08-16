@@ -4,6 +4,8 @@ import { useState } from "react";
 
 import type { Metricas } from "@/lib/dashboard-metrics";
 
+import InfoTooltip from "./InfoTooltip";
+
 const ORIGENS = [
   { chave: "instalacao", label: "Instalação", cor: "var(--origem-instalacao)" },
   { chave: "remocao", label: "Remoção", cor: "var(--origem-remocao)" },
@@ -12,7 +14,7 @@ const ORIGENS = [
 
 /** Mesmo painel de "Pendentes por tipo" do Admin, só que sem o toggle de
  * visibilidade (não faz sentido aqui — quem está vendo já é o cliente). */
-export default function PendentesPorTipo({ metricas }: { metricas: Metricas }) {
+export default function PendentesPorTipo({ metricas, descricao }: { metricas: Metricas; descricao?: string }) {
   const [origensAtivas, setOrigensAtivas] = useState<Record<string, boolean>>({
     instalacao: true,
     remocao: true,
@@ -24,7 +26,10 @@ export default function PendentesPorTipo({ metricas }: { metricas: Metricas }) {
 
   return (
     <div className="painel-db">
-      <h2>Pendentes por tipo</h2>
+      <h2>
+        Pendentes por tipo
+        {descricao && <InfoTooltip texto={descricao} label="Pendentes por tipo" />}
+      </h2>
       <div className="desc">Instalação / Remoção / Manutenção</div>
 
       <div className="origem-check-row">

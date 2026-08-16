@@ -5,6 +5,8 @@ import { useState, type ReactNode } from "react";
 import type { Metricas } from "@/lib/dashboard-metrics";
 import { formatarTick, tetoAgradavel } from "@/lib/dashboard-metricas-meta";
 
+import InfoTooltip from "./InfoTooltip";
+
 const ORIGENS = [
   { chave: "instalacao", label: "Instalação", cor: "var(--origem-instalacao)" },
   { chave: "remocao", label: "Remoção", cor: "var(--origem-remocao)" },
@@ -21,9 +23,11 @@ type Tooltip = { x: number; y: number; origem: string; bucket: string; valor: nu
 
 export default function EstadoPorOrigem({
   metricas,
+  descricao,
   rodape,
 }: {
   metricas: Metricas;
+  descricao?: string;
   /** Conteúdo extra ao final do card (ex: toggle de visibilidade no Painel Admin). */
   rodape?: ReactNode;
 }) {
@@ -41,7 +45,10 @@ export default function EstadoPorOrigem({
 
   return (
     <div className="painel-db">
-      <h2>Estado por origem</h2>
+      <h2>
+        Estado por origem
+        {descricao && <InfoTooltip texto={descricao} label="Estado por origem" />}
+      </h2>
       <div className="desc">Pendente / Em andamento / Concluído, por origem, no período filtrado</div>
 
       <div className="legenda-grafico">

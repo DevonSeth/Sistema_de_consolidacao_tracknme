@@ -5,6 +5,8 @@ import { useState, type ReactNode } from "react";
 import type { DistribuicaoUrgencia as DistribuicaoUrgenciaValores } from "@/lib/dashboard-metrics";
 import { formatarTick, tetoAgradavel } from "@/lib/dashboard-metricas-meta";
 
+import InfoTooltip from "./InfoTooltip";
+
 const NIVEIS = [
   { valor: 1, cor: "var(--nivel-1)" },
   { valor: 2, cor: "var(--nivel-2)" },
@@ -17,9 +19,11 @@ type Tooltip = { x: number; y: number; nivel: number; valor: number; cor: string
 
 export default function DistribuicaoUrgencia({
   distribuicao,
+  descricao,
   rodape,
 }: {
   distribuicao: DistribuicaoUrgenciaValores;
+  descricao?: string;
   rodape?: ReactNode;
 }) {
   const [tooltip, setTooltip] = useState<Tooltip | null>(null);
@@ -31,7 +35,10 @@ export default function DistribuicaoUrgencia({
 
   return (
     <div className="painel-db">
-      <h2>Distribuição por nível de urgência</h2>
+      <h2>
+        Distribuição por nível de urgência
+        {descricao && <InfoTooltip texto={descricao} label="Distribuição por nível de urgência" />}
+      </h2>
       <div className="desc">Pendências abertas agora, por nível (1 a 5) — não respeita o filtro de período</div>
 
       <div className="grafico-colunas">

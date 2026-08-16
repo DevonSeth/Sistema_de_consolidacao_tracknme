@@ -4,15 +4,18 @@ import { useActionState, useState, type ReactNode } from "react";
 
 import type {
   DistribuicaoUrgencia as DistribuicaoUrgenciaValores,
+  EncaminhadaParaPuma,
   Metricas,
   PendenciaSemContato,
   PontoEvolucao,
   PontoSerieDiaria,
 } from "@/lib/dashboard-metrics";
-import { METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
+import { descricaoMetrica, METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
 import DistribuicaoUrgencia from "@/app/dashboard/DistribuicaoUrgencia";
+import EncaminhadasParaPuma from "@/app/dashboard/EncaminhadasParaPuma";
 import EstadoPorOrigem from "@/app/dashboard/EstadoPorOrigem";
 import EvolucaoBacklog from "@/app/dashboard/EvolucaoBacklog";
+import InfoTooltip from "@/app/dashboard/InfoTooltip";
 import PendenciasSemContato from "@/app/dashboard/PendenciasSemContato";
 import PendentesPorCidade from "@/app/dashboard/PendentesPorCidade";
 import TendenciaDiaria from "@/app/dashboard/TendenciaDiaria";
@@ -27,6 +30,7 @@ const CHAVES_PAINEL_CUSTOM = new Set([
   "pendencias_sem_contato",
   "pendentes_por_cidade",
   "evolucao_backlog",
+  "encaminhar_puma_tabela",
 ]);
 
 // Candidatas ao toggle "Visível no Painel Operador" — o Operador já tem
@@ -63,6 +67,7 @@ export default function DashboardsClient({
   pendenciasSemContato,
   pendentesPorCidade,
   evolucaoBacklog,
+  encaminhadasParaPuma,
   desde,
   ate,
 }: {
@@ -74,6 +79,7 @@ export default function DashboardsClient({
   pendenciasSemContato: PendenciaSemContato[];
   pendentesPorCidade: { cidade: string; quantidade: number }[];
   evolucaoBacklog: PontoEvolucao[];
+  encaminhadasParaPuma: EncaminhadaParaPuma[];
   desde: string;
   ate: string;
 }) {
@@ -91,6 +97,7 @@ export default function DashboardsClient({
       <div className="full" key="tendencia_diaria">
         <TendenciaDiaria
           serie={serieDiaria}
+          descricao={descricaoMetrica("tendencia_diaria")}
           rodape={
             <>
               <TogglePainelCliente chave="tendencia_diaria" visivelInicial={visibilidade["tendencia_diaria"] ?? false} />
@@ -107,6 +114,7 @@ export default function DashboardsClient({
       <EstadoPorOrigem
         key="estado_por_origem"
         metricas={metricas}
+        descricao={descricaoMetrica("estado_por_origem")}
         rodape={
           <>
             <TogglePainelCliente chave="estado_por_origem" visivelInicial={visibilidade["estado_por_origem"] ?? false} />
@@ -120,7 +128,12 @@ export default function DashboardsClient({
     ),
     pendentes_por_tipo: (
       <div className="painel-db" key="pendentes_por_tipo">
-        <h2>Pendentes por tipo</h2>
+        <h2>
+          Pendentes por tipo
+          {descricaoMetrica("pendentes_por_tipo") && (
+            <InfoTooltip texto={descricaoMetrica("pendentes_por_tipo")!} label="Pendentes por tipo" />
+          )}
+        </h2>
         <div className="desc">Instalação / Remoção / Manutenção</div>
 
         <div className="origem-check-row">
@@ -164,6 +177,7 @@ export default function DashboardsClient({
       <DistribuicaoUrgencia
         key="distribuicao_urgencia"
         distribuicao={distribuicaoUrgencia}
+        descricao={descricaoMetrica("distribuicao_urgencia")}
         rodape={
           <>
             <TogglePainelCliente chave="distribuicao_urgencia" visivelInicial={visibilidade["distribuicao_urgencia"] ?? false} />
@@ -181,6 +195,7 @@ export default function DashboardsClient({
           serie={evolucaoBacklog}
           desde={desde}
           ate={ate}
+          descricao={descricaoMetrica("evolucao_backlog")}
           rodape={
             <>
               <TogglePainelCliente chave="evolucao_backlog" visivelInicial={visibilidade["evolucao_backlog"] ?? false} />
@@ -197,6 +212,7 @@ export default function DashboardsClient({
       <div className="full" key="pendencias_sem_contato">
         <PendenciasSemContato
           dados={pendenciasSemContato}
+          descricao={descricaoMetrica("pendencias_sem_contato")}
           rodape={
             <TogglePainelCliente chave="pendencias_sem_contato" visivelInicial={visibilidade["pendencias_sem_contato"] ?? false} />
           }
@@ -207,6 +223,7 @@ export default function DashboardsClient({
       <div className="full" key="pendentes_por_cidade">
         <PendentesPorCidade
           dados={pendentesPorCidade}
+          descricao={descricaoMetrica("pendentes_por_cidade")}
           rodape={
             <>
               <TogglePainelCliente chave="pendentes_por_cidade" visivelInicial={visibilidade["pendentes_por_cidade"] ?? false} />
@@ -215,6 +232,17 @@ export default function DashboardsClient({
                 visivelInicial={visibilidadeOperador["pendentes_por_cidade"] ?? false}
               />
             </>
+          }
+        />
+      </div>
+    ),
+    encaminhar_puma_tabela: (
+      <div className="full" key="encaminhar_puma_tabela">
+        <EncaminhadasParaPuma
+          dados={encaminhadasParaPuma}
+          descricao={descricaoMetrica("encaminhar_puma_tabela")}
+          rodape={
+            <TogglePainelCliente chave="encaminhar_puma_tabela" visivelInicial={visibilidade["encaminhar_puma_tabela"] ?? false} />
           }
         />
       </div>
@@ -244,7 +272,10 @@ export default function DashboardsClient({
                     {CANDIDATAS_OPERADOR.has(m.chave) && (
                       <VisibilidadeOperadorToggle chave={m.chave} visivelInicial={visibilidadeOperador[m.chave] ?? false} />
                     )}
-                    <div className="rotulo">{m.label}</div>
+                    <div className="rotulo">
+                      {m.label}
+                      {m.descricao && <InfoTooltip texto={m.descricao} label={m.label} />}
+                    </div>
                     <div className="valor">{valorMetrica(m.chave, metricas)}</div>
                   </div>
                 ))}

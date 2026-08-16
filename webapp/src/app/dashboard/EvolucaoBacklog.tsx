@@ -5,6 +5,8 @@ import { useRef, useState, type ReactNode } from "react";
 import type { PontoEvolucao } from "@/lib/dashboard-metrics";
 import { formatarTick, tetoAgradavel } from "@/lib/dashboard-metricas-meta";
 
+import InfoTooltip from "./InfoTooltip";
+
 const SERIES = [
   { chave: "abertas", label: "Em aberto", cor: "var(--serie-abertas)" },
   { chave: "concluidas", label: "Concluídas (total)", cor: "var(--serie-concluidas)" },
@@ -24,11 +26,13 @@ export default function EvolucaoBacklog({
   serie,
   desde,
   ate,
+  descricao,
   rodape,
 }: {
   serie: PontoEvolucao[];
   desde: string;
   ate: string;
+  descricao?: string;
   /** Conteúdo extra ao final do card (ex: toggle de visibilidade no Painel Admin). */
   rodape?: ReactNode;
 }) {
@@ -116,7 +120,10 @@ export default function EvolucaoBacklog({
 
   return (
     <div className="painel-db">
-      <h2>Evolução do backlog</h2>
+      <h2>
+        Evolução do backlog
+        {descricao && <InfoTooltip texto={descricao} label="Evolução do backlog" />}
+      </h2>
       <div className="desc">
         {visao === "periodo" ? "Saldo em aberto e total concluído, no período filtrado" : "Saldo em aberto e total concluído, desde o primeiro registro"}
       </div>

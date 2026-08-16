@@ -1,5 +1,6 @@
 import {
   buscarDistribuicaoUrgencia,
+  buscarEncaminhadasParaPuma,
   buscarEvolucaoBacklog,
   buscarMetricas,
   buscarPendenciasSemContato,
@@ -36,6 +37,7 @@ export default async function DashboardsPage({
   const pendenciasSemContato = await buscarPendenciasSemContato();
   const pendentesPorCidade = await buscarPendentesPorCidade();
   const evolucaoBacklog = await buscarEvolucaoBacklog();
+  const encaminhadasParaPuma = await buscarEncaminhadasParaPuma();
   const ultimaAtualizacao = await buscarUltimaAtualizacao();
 
   const supabase = createSupabaseServiceClient();
@@ -85,6 +87,7 @@ export default async function DashboardsPage({
         pendenciasSemContato={pendenciasSemContato}
         pendentesPorCidade={pendentesPorCidade}
         evolucaoBacklog={evolucaoBacklog}
+        encaminhadasParaPuma={encaminhadasParaPuma}
         desde={desde}
         ate={ate}
       />

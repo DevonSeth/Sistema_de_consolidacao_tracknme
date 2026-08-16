@@ -5,6 +5,8 @@ import { useRef, useState, type ReactNode } from "react";
 import type { PontoSerieDiaria } from "@/lib/dashboard-metrics";
 import { formatarTick, tetoAgradavel } from "@/lib/dashboard-metricas-meta";
 
+import InfoTooltip from "./InfoTooltip";
+
 const SERIES = [
   { chave: "disparos", label: "Disparos", cor: "var(--serie-disparos)" },
   { chave: "retornados", label: "Retornados", cor: "var(--serie-retornados)" },
@@ -22,9 +24,11 @@ function formatarDia(iso: string): string {
 
 export default function TendenciaDiaria({
   serie,
+  descricao,
   rodape,
 }: {
   serie: PontoSerieDiaria[];
+  descricao?: string;
   /** Conteúdo extra ao final do card (ex: toggle de visibilidade no Painel Admin). */
   rodape?: ReactNode;
 }) {
@@ -90,7 +94,10 @@ export default function TendenciaDiaria({
 
   return (
     <div className="painel-db">
-      <h2>Tendência diária</h2>
+      <h2>
+        Tendência diária
+        {descricao && <InfoTooltip texto={descricao} label="Tendência diária" />}
+      </h2>
       <div className="desc">Disparos e retornados por dia, no período filtrado</div>
 
       <div className="legenda-grafico">
