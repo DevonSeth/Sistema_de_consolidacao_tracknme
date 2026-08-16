@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8" />
+<title>Manual do Operador</title>
+<style>
+:root {
+  --bg: #f2f4f8;
+  --surface: #ffffff;
+  --surface-2: #e9ecf2;
+  --border: #d7dbe4;
+  --text: #1a1d27;
+  --text-muted: #666f83;
+  --text-faint: #99a1b3;
+  --sidebar-bg: #0a1b5e;
+  --sidebar-text: #b7bdd0;
+  --accent: #0046b0;
+  --accent-ink: #ffffff;
+  --accent-wash: #e4ebf8;
+  --status-ocioso-bg: #e7e9ee; --status-ocioso-fg: #5b6273;
+  --status-rodando-bg: #dbe9f7; --status-rodando-fg: #235a8c;
+  --status-sucesso-bg: #dcf1e2; --status-sucesso-fg: #1f6e3a;
+  --status-erro-bg: #fbe1de; --status-erro-fg: #a3312a;
+  --status-aguardando-bg: #faedc6; --status-aguardando-fg: #8a6410;
+  --nivel-1: #3f9d5c; --nivel-3: #d9a72e; --nivel-4: #d9822e; --nivel-5: #c94a3f;
+  --shadow: 0 1px 2px rgba(20, 22, 31, .06), 0 1px 1px rgba(20, 22, 31, .04);
+  --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Consolas", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1119; --surface: #171a24; --surface-2: #1f232f; --border: #2b2f3d;
+    --text: #e7e9f0; --text-muted: #9aa1b4; --text-faint: #6b7288;
+    --accent: #5c93e8; --accent-ink: #0a1230; --accent-wash: #1c2c4d;
+    --status-ocioso-bg: #262a37; --status-ocioso-fg: #b0b6c6;
+    --status-rodando-bg: #1c3348; --status-rodando-fg: #8fbdea;
+    --status-sucesso-bg: #1a3826; --status-sucesso-fg: #7fd39c;
+    --status-erro-bg: #3d1f1e; --status-erro-fg: #f0958c;
+    --status-aguardando-bg: #3d3117; --status-aguardando-fg: #edc667;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1119; --surface: #171a24; --surface-2: #1f232f; --border: #2b2f3d;
+  --text: #e7e9f0; --text-muted: #9aa1b4; --text-faint: #6b7288;
+  --accent: #5c93e8; --accent-ink: #0a1230; --accent-wash: #1c2c4d;
+  --status-ocioso-bg: #262a37; --status-ocioso-fg: #b0b6c6;
+  --status-rodando-bg: #1c3348; --status-rodando-fg: #8fbdea;
+  --status-sucesso-bg: #1a3826; --status-sucesso-fg: #7fd39c;
+  --status-erro-bg: #3d1f1e; --status-erro-fg: #f0958c;
+  --status-aguardando-bg: #3d3117; --status-aguardando-fg: #edc667;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 14.5px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+.faixa {
+  background: var(--sidebar-bg);
+  color: #fff;
+  padding: 30px max(20px, calc((100vw - 760px) / 2));
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.faixa .mark { width: 46px; height: 46px; border-radius: 11px; overflow: hidden; flex-shrink: 0; box-shadow: var(--shadow); }
+.faixa .mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.faixa h1 { margin: 0; font-size: 21px; font-weight: 650; letter-spacing: -.01em; }
+.faixa .papel { color: var(--sidebar-text); font-size: 13px; margin-top: 2px; }
+main { max-width: 760px; margin: 0 auto; padding: 28px 20px 60px; }
+.lead { font-size: 15px; color: var(--text-muted); margin: 0 0 24px; max-width: 62ch; }
+nav.indice {
+  display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 26px;
+  position: sticky; top: 0; background: var(--bg); padding: 10px 0; z-index: 5;
+}
+nav.indice a {
+  font-size: 12.5px; font-weight: 600; border: 1px solid var(--border);
+  background: var(--surface); color: var(--text-muted);
+  padding: 6px 12px; border-radius: 999px; text-decoration: none; white-space: nowrap;
+}
+nav.indice a:hover { border-color: var(--accent); color: var(--accent); }
+section {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  padding: 20px 22px; margin-bottom: 14px; box-shadow: var(--shadow); scroll-margin-top: 56px;
+}
+section h2 { font-size: 16px; font-weight: 650; margin: 0 0 10px; text-wrap: balance; }
+section h3 { font-size: 13.5px; font-weight: 650; margin: 18px 0 8px; }
+section p { margin: 0 0 10px; }
+section p.muted { color: var(--text-muted); font-size: 13px; }
+section :last-child { margin-bottom: 0; }
+strong { font-weight: 650; }
+code { font-family: var(--font-mono); font-size: 12.5px; background: var(--surface-2); border-radius: 4px; padding: 1px 5px; }
+ol.passos { list-style: none; margin: 12px 0; padding: 0; counter-reset: passo; }
+ol.passos > li { counter-increment: passo; display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; font-size: 13.5px; }
+ol.passos > li::before {
+  content: counter(passo); flex-shrink: 0; width: 20px; height: 20px; border-radius: 999px;
+  background: var(--accent-wash); color: var(--accent); font-size: 11px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+}
+.callout { border-left: 3px solid var(--accent); background: var(--accent-wash); border-radius: 0 8px 8px 0; padding: 12px 16px; font-size: 13px; margin: 14px 0; }
+.callout.atencao { border-left-color: var(--nivel-3); background: var(--status-aguardando-bg); color: var(--status-aguardando-fg); }
+.callout.atencao code { background: rgba(0,0,0,.08); }
+.callout code { background: rgba(0,0,0,.06); }
+.abas { display: flex; flex-direction: column; gap: 10px; margin: 14px 0; }
+.aba { background: var(--surface-2); border-radius: 10px; overflow: hidden; }
+.aba summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; font-size: 13.5px;
+}
+.aba summary::-webkit-details-marker { display: none; }
+.aba summary::before { content: "▸"; color: var(--text-muted); font-size: 11px; transition: transform .15s; }
+.aba[open] summary::before { transform: rotate(90deg); }
+.aba-titulo { font-weight: 650; }
+.aba-badge {
+  font-size: 11px; font-weight: 500; color: var(--text-muted);
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 999px; padding: 2px 9px; margin-left: auto;
+}
+.aba-intro { padding: 0 16px; margin: 0 0 10px; font-size: 12.5px; color: var(--text-muted); }
+.campos { display: grid; grid-template-columns: 150px 1fr; column-gap: 14px; padding: 0 16px 14px; }
+.campos dt { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--accent); padding: 8px 0; border-top: 1px solid var(--border); }
+.campos dd { margin: 0; font-size: 12.5px; line-height: 1.5; color: var(--text); padding: 8px 0; border-top: 1px solid var(--border); }
+.campos dt:first-of-type, .campos dd:first-of-type { border-top: none; }
+.campos dd code { font-family: var(--font-mono); font-size: 11px; background: var(--surface); border-radius: 4px; padding: 1px 5px; }
+.aba .callout { margin: 10px 16px 14px; }
+.legenda { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); margin-top: 12px; }
+.legenda .item { display: flex; align-items: center; gap: 6px; }
+.selo { font-size: 11px; font-weight: 650; border-radius: 999px; padding: 3px 10px; }
+.selo-ocioso { background: var(--status-ocioso-bg); color: var(--status-ocioso-fg); }
+.selo-rodando { background: var(--status-rodando-bg); color: var(--status-rodando-fg); }
+.selo-sucesso { background: var(--status-sucesso-bg); color: var(--status-sucesso-fg); }
+.selo-erro { background: var(--status-erro-bg); color: var(--status-erro-fg); }
+.selo-aguardando { background: var(--status-aguardando-bg); color: var(--status-aguardando-fg); }
+.faq dt { font-weight: 650; font-size: 13.5px; margin-top: 16px; }
+.faq dt:first-child { margin-top: 0; }
+.faq dd { margin: 4px 0 0; color: var(--text-muted); font-size: 13px; }
+footer { max-width: 760px; margin: 8px auto 40px; padding: 16px 20px 0; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
+@media print { nav.indice { display: none; } }
+</style>
+</head>
+<body>
+
+<div class="faixa">
+  <div class="mark"><img src="data:image/png;base64,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" alt="Viver de Rastreamento" /></div>
+  <div>
+    <h1>Manual do Operador</h1>
+    <div class="papel">Consolidação Track N&apos;Me — Viver de Rastreamento</div>
+  </div>
+</div>
+
+<main>
+  <p class="lead">
+    O que o sistema faz sozinho, a rotina do dia a dia e como alimentar a
+    planilha Operacional — sem sair daqui pra consultar.
+  </p>
+
+  <nav class="indice">
+    <a href="#visao-geral">Visão geral</a>
+    <a href="#rotina">Rotina diária</a>
+    <a href="#planilha">Como alimentar a planilha</a>
+    <a href="#fases">Fases da automação</a>
+    <a href="#login">Login</a>
+    <a href="#avisos">Avisos importantes</a>
+    <a href="#faq">Perguntas frequentes</a>
+  </nav>
+
+  <section id="visao-geral">
+    <h2>Visão geral</h2>
+    <p>
+      Você cuida do <strong>contato com o associado</strong> depois que o
+      sistema já identificou uma pendência (manutenção, instalação ou
+      remoção) e já calculou a urgência dela sozinho. O trabalho tem 3
+      frentes: <strong>priorizar e disparar</strong> o primeiro contato por
+      WhatsApp, <strong>ligar</strong> pras que não responderam, e
+      <strong>registrar o resultado</strong> — encaminhando pra Puma
+      quando não der certo.
+    </p>
+    <p class="muted">
+      O sistema decide sozinho quando uma pendência nasce, qual a urgência
+      dela e quando avança pra próxima etapa da esteira (WhatsApp →
+      ligação → Puma). Se algo parecer estranho, o motivo geralmente está
+      a montante (Track N&apos;Me, cadastro do administrador, ou SGA) — não
+      é algo pra corrigir direto na planilha.
+    </p>
+  </section>
+
+  <section id="rotina">
+    <h2>Rotina diária</h2>
+    <ol class="passos">
+      <li>Abra o Painel Operador e faça login, depois rode a rotina do dia — tudo de uma vez, ou retome de onde parou se ontem foi interrompido.</li>
+      <li>Logue manualmente no SGA quando o app pedir (captcha impede login automático) — só uma vez por sessão.</li>
+      <li>Confirme a reconexão manual se o Track N&apos;Me ou o SGA caírem no meio do processamento.</li>
+      <li>Abra a planilha e revise <strong>Tratativas</strong>, do maior <strong>Nível de Urgência</strong> pro menor (a cor da célula já ajuda a enxergar isso de cara).</li>
+      <li>Marque <strong>Selecionado</strong> nas linhas que devem receber WhatsApp neste ciclo.</li>
+      <li>Preencha <strong>Atendimento</strong> (+ <strong>Base</strong> ou <strong>Ponto de Ação</strong>) e, se fizer sentido, o <strong>Técnico</strong>.</li>
+      <li>Acompanhe <strong>Pendente de Ligação</strong> — ligue pras pendências escaladas e registre o resultado.</li>
+      <li>Acompanhe <strong>Encaminhar pra Puma</strong> — casos que já passaram por toda a esteira sem sucesso.</li>
+      <li>Marque <strong>Finalizado</strong> sempre que resolver uma pendência por um caminho que o sistema não enxerga sozinho.</li>
+    </ol>
+  </section>
+
+  <section id="planilha">
+    <h2>Como alimentar a planilha</h2>
+    <p>
+      A planilha "Operacional - Pendências - Puma" tem 4 abas. Em cada uma,
+      a cor do cabeçalho já avisa quem preenche: <strong>navy</strong> é o
+      sistema (nunca edite), <strong>azul da marca</strong> é você.
+    </p>
+
+    <div class="abas">
+      <details class="aba" open>
+        <summary><span class="aba-titulo">Tratativas</span><span class="aba-badge">10 campos</span></summary>
+        <p class="aba-intro">A fila principal — priorizada por urgência, é onde a maior parte do seu dia acontece.</p>
+        <dl class="campos">
+          <dt>Selecionado</dt><dd>Marca a linha pra entrar no próximo disparo de WhatsApp. Não reseta sozinho.</dd>
+          <dt>Atendimento</dt><dd>Base / Em rota / Ação — obrigatório antes do 1º disparo.</dd>
+          <dt>Base / Ponto de Ação</dt><dd>Preencha o que combinar com o Atendimento escolhido.</dd>
+          <dt>Técnico</dt><dd>Quando fizer sentido pra essa pendência.</dd>
+          <dt>Discrepância revisada</dt><dd>Esconde temporariamente um caso de remoção que você já está checando por fora.</dd>
+          <dt>Telefone corrigido</dt><dd>Libera um novo disparo depois de corrigir um WhatsApp inválido.</dd>
+          <dt>Situação Manual</dt><dd>Pausa a esteira automática — <strong>não</strong> remove a linha sozinha (marque Finalizado também).</dd>
+          <dt>Data Agendada</dt><dd>Data combinada com o associado, se houver.</dd>
+          <dt>Observação Manual</dt><dd>Qualquer anotação livre.</dd>
+          <dt>Finalizado</dt><dd><strong>Única forma de tirar a linha manualmente.</strong></dd>
+        </dl>
+      </details>
+
+      <details class="aba">
+        <summary><span class="aba-titulo">Pendente de Ligação</span><span class="aba-badge">6 campos</span></summary>
+        <p class="aba-intro">Chega aqui sozinha, depois de 3 tentativas de WhatsApp sem resposta.</p>
+        <dl class="campos">
+          <dt>Atendimento / Base / Ponto de Ação</dt><dd>Editável de novo aqui — se descobrir na ligação que o tipo certo é outro.</dd>
+          <dt>Data Contato</dt><dd>Data em que você ligou.</dd>
+          <dt>Retornou?</dt><dd>O associado atendeu/retornou a ligação?</dd>
+          <dt>Conseguiu Agendar?</dt><dd>Só preencha se Retornou? = Sim.</dd>
+          <dt>Observação</dt><dd>Qualquer detalhe da ligação.</dd>
+          <dt>Finalizado</dt><dd>Sempre vence — ver regra abaixo.</dd>
+        </dl>
+        <div class="callout atencao">
+          <strong>Regra de leitura:</strong> <code>Finalizado</code> marcado sempre vence. Sem ele —
+          <code>Retornou?</code> vazio → aguarda.
+          <code>Retornou? = Não</code> → vai sozinha pra Encaminhar pra Puma.
+          <code>Retornou? = Sim</code> + <code>Conseguiu Agendar? = Sim</code> → <strong>continua na aba</strong> (só sai ao marcar Finalizado, depois de confirmar que aconteceu de verdade).
+          <code>Retornou? = Sim</code> + <code>Conseguiu Agendar? = Não</code> → continua esperando um novo agendamento.
+        </div>
+      </details>
+
+      <details class="aba">
+        <summary><span class="aba-titulo">Encaminhar pra Puma</span><span class="aba-badge">2 campos</span></summary>
+        <p class="aba-intro">Casos que não retornaram a ligação.</p>
+        <dl class="campos">
+          <dt>Status</dt><dd>Manutenção/instalação: o sistema marca <code>concluido</code> sozinho quando detecta. Remoção: preencha manualmente.</dd>
+          <dt>Observação Puma</dt><dd>Anotação livre sobre o andamento.</dd>
+        </dl>
+      </details>
+
+      <details class="aba">
+        <summary><span class="aba-titulo">Alertas</span><span class="aba-badge">2 campos</span></summary>
+        <p class="aba-intro">Respostas do associado que o sistema detecta, mas não sabe resolver sozinho.</p>
+        <dl class="campos">
+          <dt>Ação</dt><dd>Só pra "Retorno tardio": <strong>Confirma conclusão</strong> (finaliza sozinho onde a pendência estiver) ou <strong>Foi engano, ignorar</strong>.</dd>
+          <dt>Data Agendada</dt><dd>Só pra "Agendado sem data": preencha a data combinada com o associado.</dd>
+        </dl>
+      </details>
+    </div>
+  </section>
+
+  <section id="fases">
+    <h2>Fases da automação</h2>
+    <p>
+      A aba "Fases da Automação" do Painel Operador roda as etapas do
+      robô: baixar os relatórios do Track N&apos;Me, rodar o motor de
+      regras, consultar o SGA, publicar a fila em Tratativas, disparar
+      WhatsApp e escalonar pra ligação.
+    </p>
+    <p class="muted"><strong>Executar selecionadas</strong> roda só as etapas marcadas; <strong>Executar tudo</strong> roda a esteira inteira em sequência; <strong>Cancelar</strong> interrompe uma execução em andamento. O botão <strong>Ir para tratativas</strong>, no menu lateral, abre a aba Tratativas do Google Sheets direto numa aba nova do navegador.</p>
+    <div class="legenda">
+      <div class="item"><span class="selo selo-ocioso">Ocioso</span> nunca rodou / esperando</div>
+      <div class="item"><span class="selo selo-rodando">Rodando</span> em execução agora</div>
+      <div class="item"><span class="selo selo-sucesso">Sucesso</span> concluída sem erro</div>
+      <div class="item"><span class="selo selo-erro">Erro</span> falhou, ver mensagem</div>
+      <div class="item"><span class="selo selo-aguardando">Aguardando você</span> sessão caiu, precisa relogar</div>
+    </div>
+  </section>
+
+  <section id="login">
+    <h2>Login</h2>
+    <p>
+      Ao abrir o Painel Operador, uma tela de login cobre o app inteiro —
+      entre com a conta do Operador. O login é pedido <strong>toda vez
+      que o app abre</strong> (não fica lembrado de uma sessão pra outra).
+    </p>
+    <div class="callout">
+      Essa conta é só pro Painel Operador — não abre nada no webapp
+      (Painel Admin ou Dashboard Cliente), mesmo que a senha seja
+      reaproveitada por engano.
+    </div>
+  </section>
+
+  <section id="avisos">
+    <h2>Avisos importantes</h2>
+    <div class="callout atencao">
+      <strong>Situação Manual não tira a linha da aba.</strong> Ela só
+      pausa a esteira automática. Se o caso realmente terminou, marque
+      <strong>Finalizado</strong> também — são duas ações independentes.
+    </div>
+    <div class="callout atencao">
+      <strong>Não ordene a aba Tratativas pra reorganizar linhas</strong> —
+      o sistema reescreve a aba inteira a cada execução, e a ordem se
+      perde no próximo ciclo. Prefira um <strong>filtro</strong> (ícone de
+      funil do Google Sheets).
+    </div>
+    <div class="callout atencao">
+      <strong>Nunca edite a coluna <code>ID (hash)</code>.</strong> É assim
+      que o sistema reconhece que uma linha é a mesma pendência de ontem.
+    </div>
+  </section>
+
+  <section id="faq">
+    <h2>Perguntas frequentes</h2>
+    <dl class="faq">
+      <dt>Uma pendência pode voltar de Pendente de Ligação pra Tratativas?</dt>
+      <dd>Não existe esse caminho de volta hoje — uma vez escalada pra ligação, o ciclo segue pra frente (finalizado ou Puma).</dd>
+      <dt>Posso ligar antes de a pendência chegar em Pendente de Ligação sozinha?</dt>
+      <dd>Sim, mas o sistema só processa o resultado se a linha já estiver de fato nessa aba. Anote em Observação Manual até escalar de verdade.</dd>
+      <dt>O que fazer se uma pendência parece "esquecida"?</dt>
+      <dd>A coluna "Dias sem contato" fica vermelha quando passa de 7 dias úteis sem contato — é só destaque visual, cabe a você agir ao ver a cor.</dd>
+      <dt>Por que uma urgência não parece fazer sentido pra mim?</dt>
+      <dd>Confira Ação Sugerida/Observação do Sistema primeiro — geralmente explica a regra. Se ainda não bater, o dado de origem (Track N&apos;Me, cadastro do administrador, ou SGA) pode estar desatualizado.</dd>
+    </dl>
+  </section>
+</main>
+
+<footer>Desenvolvido por Devon em parceria com a Viver de Rastreamento — devon@hazelab.tec.br</footer>
+
+</body>
+</html>
