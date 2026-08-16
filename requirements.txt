@@ -18,3 +18,4 @@ holidays           # calendário de feriados BR (orchestrator, ainda não implem
 # --- dev / testes (não vai pro executável final) ---
 pytest             # testes unitários de core/
 pytest-asyncio     # testes unitários de código async (integrations/playwright_utils.py)
+pillow             # gera ui/assets/app_icon.ico a partir da logo — só rodado a mão quando a logo muda

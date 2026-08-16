@@ -97,6 +97,12 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,
+    # Ícone do .exe — é o que o Windows mostra na barra de tarefas/título
+    # (achado: `webview.start(icon=...)` só funciona em GTK/QT, não no
+    # backend edgechromium do Windows, então sem isso o app herda o
+    # ícone padrão do Python). Gerado a partir da mesma logo já usada no
+    # favicon do webapp (`webapp/src/app/icon.png`).
+    icon="ui/assets/app_icon.ico",
     # Desliga o layout "_internal/" (padrão desde PyInstaller 6) — todo o
     # código do projeto (config/manager.py::_diretorio_config, ui/app.py::
     # _diretorio_web, main.py::PLAYWRIGHT_BROWSERS_PATH) já assume que
