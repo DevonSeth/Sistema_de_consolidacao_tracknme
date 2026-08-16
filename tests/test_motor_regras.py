@@ -731,6 +731,10 @@ class TestClassificarIncidentesIntegracao:
         # Grupo 1 (abrir automaticamente): reabertura do ALERTA_CLIENTE + scan do Grupo 1
         chassis_grupo1 = {linha["chassi"] for linha in resultado["grupo_1_abrir"]}
         assert chassis_grupo1 == {"CHASSI-008", "CHASSI-009"}
+        # chassi_sga sempre igual a chassi aqui -- vem direto do equipamento
+        # (Rastreadores Ativos), sem ambiguidade de dedup.
+        for linha in resultado["grupo_1_abrir"]:
+            assert linha["chassi_sga"] == linha["chassi"]
 
 
 class TestMontarLinhaResultado:
@@ -756,6 +760,10 @@ class TestMontarLinhaResultado:
         assert linha["data_incidente"] == "01/08/2026 10:00:00"
         assert linha["evento"] == "Sem comunicação"
         assert linha["telefone"] == ""  # sem equipamento encontrado
+        # sem equipamento confirmado no cadastro -- "CHASSI-XYZ" aqui é só
+        # o identificador de dedup (poderia ser um IMEI), nunca vira
+        # chassi_sga sem confirmação (achado 2026-08-16).
+        assert linha["chassi_sga"] is None
 
     def test_identificador_cai_pra_placa_quando_sem_chassi(self):
         incidente = {"ID": "2", "Placa": "BBB2222"}
@@ -765,6 +773,7 @@ class TestMontarLinhaResultado:
         assert linha["identificador"] == "BBB2222"
         assert linha["data_incidente"] == ""
         assert linha["evento"] == ""
+        assert linha["chassi_sga"] is None
 
     def test_telefone_vem_do_equipamento_quando_encontrado(self):
         incidente = {"ID": "3", "Placa": "CCC3333"}
@@ -772,6 +781,10 @@ class TestMontarLinhaResultado:
         linha = _montar_linha_resultado(incidente, "REGRA_1", equipamento, "CHASSI-CCC", self.TEMPLATES, self.PARAMETROS)
 
         assert linha["telefone"] == "+5581988887777"
+        # equipamento confirmado no cadastro -- chassi_sga vem do próprio
+        # equipamento (col. Chassi), independente do identificador de dedup
+        # ("CHASSI-CCC" aqui é só o 4º parâmetro, usado só pro dedup).
+        assert linha["chassi_sga"] == "9BWZZZ377VT004251"
 
     def test_modelo_vem_do_equipamento_quando_encontrado(self):
         incidente = {"ID": "4", "Placa": "DDD4444"}

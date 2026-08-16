@@ -363,15 +363,15 @@ async def retomar_etapa(
     iniciado_em = datetime.now(timezone.utc)
 
     if etapa.id == "enriquecimento_sga":
-        mapa_placas = resultado_travado.dados.get("mapa_placas", {})
+        alvos = resultado_travado.dados.get("alvos_consulta_sga", {})
         novo = await pipeline.etapa_enriquecimento_sga(
-            chassis_override=pendentes, mapa_placas_override=mapa_placas, **kwargs
+            chassis_override=pendentes, alvos_override=alvos, **kwargs
         )
         fundido = {**resultado_travado.dados["situacoes_sga"], **novo.dados["situacoes_sga"]}
         falhas_fundidas = resultado_travado.dados.get("falhas", []) + novo.dados.get("falhas", [])
         resultado_final = pipeline.ResultadoEtapa(
             etapa.id, sucesso=novo.sucesso, mensagem=novo.mensagem,
-            dados={"situacoes_sga": fundido, "falhas": falhas_fundidas, "mapa_placas": mapa_placas},
+            dados={"situacoes_sga": fundido, "falhas": falhas_fundidas, "alvos_consulta_sga": alvos},
             aguardando_reconexao=novo.aguardando_reconexao, cancelado=novo.cancelado,
         )
         _registrar_execucao_segura(execucao_id, etapa.id, iniciado_em, datetime.now(timezone.utc), resultado_final)

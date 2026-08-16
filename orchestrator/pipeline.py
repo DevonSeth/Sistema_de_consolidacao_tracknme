@@ -85,6 +85,8 @@ from core.constants import (
     STATUS_FINALIZADO,
     STATUS_PENDENTE,
     STATUS_RESPONDIDO,
+    TIPO_IDENTIFICADOR_CHASSI,
+    TIPO_IDENTIFICADOR_PLACA,
 )
 from core.normalizacao import normalizar_placa
 from config import manager
@@ -474,28 +476,6 @@ async def etapa_fechar_incidentes_automaticos(
     )
 
 
-def _chassis_para_consultar_sga(dados_classificacao: dict, instalacao_remocao: list[dict]) -> list[str]:
-    """União dos chassis que sobraram na classificação de Manutenção
-    (`grupo_1_abrir`/`grupo_2_concluir`/`grupo_3_tratativa_humana` —
-    inclui os recém-abertos do Grupo 1, decisão do usuário) com os
-    chassis de Instalação-Remoção. Uma consulta só ao SGA, reaproveitada
-    pelas 3 origens."""
-    chassis = set()
-    for linha in (
-        dados_classificacao["grupo_1_abrir"]
-        + dados_classificacao["grupo_2_concluir"]
-        + dados_classificacao["grupo_3_tratativa_humana"]
-    ):
-        chassi = (linha.get("chassi") or "").strip().upper()
-        if chassi:
-            chassis.add(chassi)
-    for registro in instalacao_remocao:
-        chassi = (registro.get("Chassi") or "").strip().upper()
-        if chassi:
-            chassis.add(chassi)
-    return sorted(chassis)
-
-
 def _placas_genericas(parametros: dict) -> list[str]:
     """Mesmo split de `system_parameters.placas_genericas` (texto CSV) já
     feito em `core.motor_regras._placas_genericas`/`integrations.
@@ -507,35 +487,54 @@ def _placas_genericas(parametros: dict) -> list[str]:
     return [item.strip() for item in str(valor).split(",") if item.strip()]
 
 
-def _mapa_placas_por_identificador(
+def _alvos_consulta_sga(
     dados_classificacao: dict, instalacao_remocao: list[dict], parametros: dict
-) -> dict[str, str]:
-    """Identificador (chassi/IMEI/placa-fallback, upper — mesma chave usada
-    em `_chassis_para_consultar_sga`) -> placa normalizada conhecida do
-    veículo. Usado como 2ª tentativa de busca no SGA quando a busca por
-    Chassi não encontrar nada (achado 2026-08-16: `core.motor_regras.
-    _resolver_chassi` às vezes usa o IMEI ou a própria placa como
-    identificador, e a busca por Chassi nunca acha esses casos, mesmo
-    quando o SGA acharia buscando por Placa). Só entra no mapa quando a
-    placa normaliza pra um valor válido (não vazia, não genérica) — mesma
-    normalização usada no resto do motor de regras."""
+) -> dict[str, tuple[str, str]]:
+    """Decide, ANTES de consultar o SGA, o que buscar por veículo — nunca
+    o identificador de dedup cru (achado 2026-08-16: `core.motor_regras.
+    _resolver_chassi` às vezes usa o IMEI ou a placa normalizada como
+    identificador só pra dedup interno, e o SGA tem campos Chassi/Placa
+    INDEPENDENTES — mandar um IMEI pro campo Chassi não faz sentido).
+
+    Devolve `{identificador_dedup (upper): (tipo, valor)}` — a chave
+    continua sendo o identificador de dedup (mesma chave usada em
+    `situacoes_sga`/`aplicar_situacoes_sga`/`classificar_instalacao_
+    remocao`, só pra bookkeeping interno), mas `(tipo, valor)` é sempre
+    algo que o SGA de fato aceita: `TIPO_IDENTIFICADOR_CHASSI` com
+    `linha["chassi_sga"]` (chassi CONFIRMADO via cadastro, ver
+    `core.motor_regras._montar_linha_resultado`/`_equipamento_para_
+    abertura`) quando existe; senão `TIPO_IDENTIFICADOR_PLACA` com a placa
+    do incidente normalizada (só se válida — não genérica/fictícia).
+    Veículo sem chassi confirmado e sem placa válida fica de fora do
+    dict — não há nada confiável pra digitar em nenhum dos 2 campos, e
+    "não consultado" já é tratado graciosamente por quem consome
+    `situacoes_sga` (mantém a classificação original).
+
+    Pra Instalação-Remoção, o "Chassi" da própria aba é sempre tratado
+    como confirmado (decisão já existente, `core.motor_regras_
+    instalacao_remocao`: chassi sempre presente nessa aba)."""
     genericas = _placas_genericas(parametros)
-    mapa: dict[str, str] = {}
+    alvos: dict[str, tuple[str, str]] = {}
     for linha in (
         dados_classificacao["grupo_1_abrir"]
         + dados_classificacao["grupo_2_concluir"]
         + dados_classificacao["grupo_3_tratativa_humana"]
     ):
-        chassi = (linha.get("chassi") or "").strip().upper()
-        placa = normalizar_placa(linha.get("placa", ""), genericas)
-        if chassi and placa:
-            mapa.setdefault(chassi, placa)
+        chave = (linha.get("chassi") or "").strip().upper()
+        if not chave:
+            continue
+        chassi_sga = (linha.get("chassi_sga") or "").strip().upper()
+        if chassi_sga:
+            alvos.setdefault(chave, (TIPO_IDENTIFICADOR_CHASSI, chassi_sga))
+            continue
+        placa_valida = normalizar_placa(linha.get("placa", ""), genericas)
+        if placa_valida:
+            alvos.setdefault(chave, (TIPO_IDENTIFICADOR_PLACA, placa_valida))
     for registro in instalacao_remocao:
         chassi = (registro.get("Chassi") or "").strip().upper()
-        placa = normalizar_placa(registro.get("Placa", ""), genericas)
-        if chassi and placa:
-            mapa.setdefault(chassi, placa)
-    return mapa
+        if chassi:
+            alvos.setdefault(chassi, (TIPO_IDENTIFICADOR_CHASSI, chassi))
+    return alvos
 
 
 def _persistir_situacoes_sga(resultados: list, agora: datetime) -> dict:
@@ -572,52 +571,53 @@ async def etapa_enriquecimento_sga(
     dados_classificacao: dict | None = None,
     instalacao_remocao: list[dict] | None = None,
     chassis_override: list[str] | None = None,
-    mapa_placas_override: dict[str, str] | None = None,
+    alvos_override: dict[str, tuple[str, str]] | None = None,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_worker_status: Callable[[int, str], None] | None = None,
 ) -> ResultadoEtapa:
     """Única etapa manual (login no SGA exige captcha) — cobre Manutenção,
     Instalação e Remoção numa consulta só, decisão do usuário: `dados_
-    classificacao` (default: `etapa_motor_de_regras()`) dá os chassis de
-    Manutenção; `instalacao_remocao` (default: `ler_aba(...)`) dá os
-    chassis de Instalação/Remoção. `chassis_override`/`mapa_placas_
-    override` (usados só na retomada depois de uma reconexão manual)
-    ignoram os dois defaults caros e consultam só os chassis informados —
-    nunca rechama `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho.
+    classificacao` (default: `etapa_motor_de_regras()`) dá os veículos de
+    Manutenção; `instalacao_remocao` (default: `ler_aba(...)`) dá os de
+    Instalação/Remoção. `chassis_override`/`alvos_override` (usados só na
+    retomada depois de uma reconexão manual) ignoram os dois defaults
+    caros e consultam só os identificadores informados — nunca rechama
+    `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho.
 
-    Pra cada chassi: consulta o SGA ao vivo (tentando também pela Placa
-    quando a busca por Chassi não encontra nada — achado 2026-08-16, ver
-    `integrations.sga_bot.consultar_situacao` — `mapa_placas` dá a placa
-    conhecida de cada identificador, construída por `_mapa_placas_por_
-    identificador`), lê o registro anterior de `situacao_veiculo_sga`
-    (Supabase), recalcula com `core.motor_regras_instalacao_remocao.
-    atualizar_situacao_sga` (pura — decide se `desde` reinicia) e persiste
-    de volta. Devolve um dict só, `situacoes_sga` ({chassi: {status,
-    desde, cidade, bairro, encontrado_via}}) — reaproveitado tanto por
-    `core.motor_regras.aplicar_situacoes_sga` (Manutenção, usa status/
-    cidade/bairro) quanto por `core.motor_regras_instalacao_remocao.
-    classificar_instalacao_remocao` (usa status/desde pro gating de
-    remoção). Antes desta sessão (2026-08-07) essa etapa produzia dois
-    dicts em paralelo e descartava `cidade`/`bairro` do retorno de
-    `sga_bot.consultar_situacao` — bug corrigido junto com a unificação.
+    Pra cada veículo: consulta o SGA ao vivo com `_alvos_consulta_sga`
+    dizendo qual campo usar de verdade (Chassi confirmado via cadastro, ou
+    Placa quando não há chassi confirmado — achado 2026-08-16: nunca
+    manda o identificador de dedup cru, que pode ser um IMEI, pro campo
+    Chassi, ver `integrations.sga_bot.consultar_situacao`), lê o registro
+    anterior de `situacao_veiculo_sga` (Supabase), recalcula com
+    `core.motor_regras_instalacao_remocao.atualizar_situacao_sga` (pura —
+    decide se `desde` reinicia) e persiste de volta. Devolve um dict só,
+    `situacoes_sga` ({chassi: {status, desde, cidade, bairro,
+    encontrado_via}}) — reaproveitado tanto por `core.motor_regras.
+    aplicar_situacoes_sga` (Manutenção, usa status/cidade/bairro) quanto
+    por `core.motor_regras_instalacao_remocao.classificar_instalacao_
+    remocao` (usa status/desde pro gating de remoção). Antes desta sessão
+    (2026-08-07) essa etapa produzia dois dicts em paralelo e descartava
+    `cidade`/`bairro` do retorno de `sga_bot.consultar_situacao` — bug
+    corrigido junto com a unificação.
 
     Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`),
-    os chassis que já tinham resultado ANTES da queda são persistidos
-    mesmo assim — só os `pendentes` voltam pra tela pedir reconexão
-    manual. `on_progresso`/`on_worker_status` (opcionais) repassam pro
-    `processar_fila` subjacente — `on_worker_status` reporta o chassi que
-    cada worker está consultando agora. `dados["falhas"]` lista os
-    chassis que não tiveram sucesso na consulta (antes descartados
-    silenciosamente por `_persistir_situacoes_sga`, que só grava quem
-    teve sucesso). `dados["mapa_placas"]` é sempre incluído (mesmo nos 2
-    desfechos de interrupção) só pra `orchestrator.catalogo_etapas.
-    retomar_etapa` repassar como `mapa_placas_override` na retomada, sem
-    precisar recalcular `dados_classificacao` do zero.
+    os identificadores que já tinham resultado ANTES da queda são
+    persistidos mesmo assim — só os `pendentes` voltam pra tela pedir
+    reconexão manual. `on_progresso`/`on_worker_status` (opcionais)
+    repassam pro `processar_fila` subjacente. `dados["falhas"]` lista os
+    identificadores que não tiveram sucesso na consulta (antes
+    descartados silenciosamente por `_persistir_situacoes_sga`, que só
+    grava quem teve sucesso). `dados["alvos_consulta_sga"]` é sempre
+    incluído (mesmo nos 2 desfechos de interrupção) só pra
+    `orchestrator.catalogo_etapas.retomar_etapa` repassar como
+    `alvos_override` na retomada, sem precisar recalcular
+    `dados_classificacao` do zero.
     """
     if chassis_override is not None:
         chassis = chassis_override
-        mapa_placas = mapa_placas_override or {}
+        alvos = alvos_override or {}
     else:
         if dados_classificacao is None:
             resultado_motor = etapa_motor_de_regras()
@@ -628,23 +628,24 @@ async def etapa_enriquecimento_sga(
             instalacao_remocao = google_sheets_client.ler_aba(
                 google_sheets_client.NOME_PLANILHA_ADMINISTRADOR, "Instalação-Remoção"
             )
-        chassis = _chassis_para_consultar_sga(dados_classificacao, instalacao_remocao)
         parametros = supabase_client.buscar_parametros()
-        mapa_placas = _mapa_placas_por_identificador(dados_classificacao, instalacao_remocao, parametros)
+        alvos = _alvos_consulta_sga(dados_classificacao, instalacao_remocao, parametros)
+        chassis = sorted(alvos.keys())
 
     on_item_iniciado = None
     if on_worker_status is not None:
         on_item_iniciado = lambda worker_id, chassi: on_worker_status(worker_id, _descrever_chassi_sga(chassi))  # noqa: E731
 
-    async def _consultar_com_fallback_placa(page, chassi):
-        return await sga_bot.consultar_situacao(page, chassi, placa=mapa_placas.get(chassi))
+    async def _consultar(page, chave):
+        tipo, valor = alvos[chave]
+        return await sga_bot.consultar_situacao(page, tipo, valor)
 
     try:
         async with async_playwright() as playwright:
             browser, context = await sga_bot.aguardar_login_manual(playwright)
             try:
                 resultados = await playwright_utils.processar_fila(
-                    context, chassis, _consultar_com_fallback_placa,
+                    context, chassis, _consultar,
                     on_progresso=on_progresso, cancelar_checker=cancelar_checker,
                     on_item_iniciado=on_item_iniciado,
                 )
@@ -661,7 +662,7 @@ async def etapa_enriquecimento_sga(
             dados={
                 "situacoes_sga": situacoes_sga,
                 "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
-                "mapa_placas": mapa_placas,
+                "alvos_consulta_sga": alvos,
             },
             aguardando_reconexao={"pendentes": e.pendentes},
         )
@@ -674,7 +675,7 @@ async def etapa_enriquecimento_sga(
             dados={
                 "situacoes_sga": situacoes_sga,
                 "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
-                "mapa_placas": mapa_placas,
+                "alvos_consulta_sga": alvos,
             },
             cancelado={"pendentes": e.pendentes},
         )
@@ -688,7 +689,7 @@ async def etapa_enriquecimento_sga(
         dados={
             "situacoes_sga": situacoes_sga,
             "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga),
-            "mapa_placas": mapa_placas,
+            "alvos_consulta_sga": alvos,
         },
     )
 

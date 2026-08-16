@@ -2,10 +2,12 @@
 Robô Playwright para o SGA (Hinova) — reescrita a partir de `sga_bot.py`
 (script legado), mantendo a lógica de negócio que já está certa:
 
-    - Busca a situação de pagamento, cidade e bairro por CHASSI.
-    - O chassi é obtido buscando a PLACA na base de Rastreadores Ativos
-      (já implementado assim no legado — mantém, é responsabilidade de
-      quem chama `consultar_situacao`, não deste módulo).
+    - Busca a situação de pagamento, cidade e bairro por CHASSI ou por
+      PLACA — a tela de consulta do SGA tem os 2 campos, cada um só
+      aceita o tipo certo de valor. Quem chama `consultar_situacao`
+      decide qual usar (achado 2026-08-16: nunca é seguro mandar um
+      pseudo-identificador de dedup interno, como um IMEI, pro campo
+      Chassi) — não é responsabilidade deste módulo.
     - Login SEMPRE manual (reCAPTCHA, impossível automatizar) — o robô
       abre o navegador visível, espera o humano logar, e só então
       processa a fila.
@@ -33,7 +35,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from core.constants import STATUS_SGA_NAO_ENCONTRADO
+from core.constants import STATUS_SGA_NAO_ENCONTRADO, TIPO_IDENTIFICADOR_CHASSI
 from integrations.playwright_utils import SessaoCaidaError
 
 URL_LOGIN = "https://sga.hinova.com.br/sga/sgav4_pumabeneficios/v5/login.php"
@@ -54,9 +56,6 @@ SELETOR_BAIRRO_CORRESPONDENCIA = "#dfsBairroCorrespondencia"
 # confirmados por captura ainda -- validar ao vivo antes de confiar cegamente.
 SELETOR_CAMPO_PLACA_FILTRO = "#dfsPlacaFiltro"
 SELETOR_CAMPO_PLACA_ANCORA = "#dfsPlaca"
-
-ENCONTRADO_VIA_CHASSI = "chassi"
-ENCONTRADO_VIA_PLACA = "placa"
 
 # Reexportado de core.constants (não duplicar o valor — core/motor_regras.py
 # também precisa comparar contra ele, e core/ não importa integrations/).
@@ -167,32 +166,32 @@ async def _buscar_por_identificador(
     return {"status": status, "cidade": cidade, "bairro": bairro}
 
 
-async def consultar_situacao(page: Page, chassi: str, placa: str | None = None) -> dict:
-    """Busca `chassi` no SGA (campo Chassi da tela de consulta) e retorna
-    `{'status': ..., 'cidade': ..., 'bairro': ..., 'encontrado_via': ...}`.
+async def consultar_situacao(page: Page, tipo: str, valor: str) -> dict:
+    """Busca `valor` no SGA e retorna `{'status': ..., 'cidade': ...,
+    'bairro': ..., 'encontrado_via': tipo}`.
 
-    Achado 2026-08-16: `chassi` recebido aqui nem sempre é um chassi de
-    verdade -- `core.motor_regras._resolver_chassi` tem fallback pra IMEI
-    ou pra placa normalizada quando o veículo não bate em Rastreadores
-    Ativos, e a busca por Chassi nunca acha nada nesses casos, mesmo
-    quando o SGA teria achado buscando por Placa (a mesma tela tem os 2
-    campos). Por isso, quando a busca por Chassi retorna `NÃO ENCONTRADO`
-    e uma `placa` válida foi informada (normalizada por quem chama --
-    este módulo não conhece `placas_genericas`), tenta de novo, na mesma
-    página, pelo campo Placa. `encontrado_via` ("chassi"/"placa") registra
-    qual busca realmente achou o veículo -- alimenta o diagnóstico de
-    eficiência do SGA (quanto o fallback importa na prática).
+    Achado 2026-08-16: os campos Chassi e Placa da tela do SGA são
+    INDEPENDENTES — cada um só aceita o tipo certo de valor. Quem chama
+    (`orchestrator.pipeline._alvos_consulta_sga`) já decidiu ANTES de
+    consultar se há um chassi CONFIRMADO no cadastro (Rastreadores Ativos)
+    ou só uma placa real/válida — `tipo` (`core.constants.
+    TIPO_IDENTIFICADOR_CHASSI`/`_PLACA`) diz qual campo usar. Este módulo
+    nunca tenta os dois nem adivinha: se `tipo` for chassi e o SGA não
+    achar, "NÃO ENCONTRADO" é o resultado final — não faz sentido tentar
+    de novo pela Placa (decisão do usuário, 2026-08-16): isso reintroduz a
+    mesma mistura de campos que causou o achado original (mandar um IMEI,
+    usado só pra dedup interno em `core.motor_regras._resolver_chassi`,
+    pro campo Chassi do SGA).
     """
-    resultado = await _buscar_por_identificador(
-        page, chassi, SELETOR_CAMPO_CHASSI_FILTRO, SELETOR_CAMPO_CHASSI_ANCORA
-    )
-    if resultado["status"] == STATUS_NAO_ENCONTRADO and placa:
-        resultado_placa = await _buscar_por_identificador(
-            page, placa, SELETOR_CAMPO_PLACA_FILTRO, SELETOR_CAMPO_PLACA_ANCORA
+    if tipo == TIPO_IDENTIFICADOR_CHASSI:
+        resultado = await _buscar_por_identificador(
+            page, valor, SELETOR_CAMPO_CHASSI_FILTRO, SELETOR_CAMPO_CHASSI_ANCORA
         )
-        if resultado_placa["status"] != STATUS_NAO_ENCONTRADO:
-            return {**resultado_placa, "encontrado_via": ENCONTRADO_VIA_PLACA}
-    return {**resultado, "encontrado_via": ENCONTRADO_VIA_CHASSI}
+    else:
+        resultado = await _buscar_por_identificador(
+            page, valor, SELETOR_CAMPO_PLACA_FILTRO, SELETOR_CAMPO_PLACA_ANCORA
+        )
+    return {**resultado, "encontrado_via": tipo}
 
 
 async def _extrair_campo_correspondencia(page: Page, seletor: str) -> str:
@@ -218,7 +217,3 @@ async def _extrair_campo_correspondencia(page: Page, seletor: str) -> str:
         if tentativa < 2:
             await asyncio.sleep(0.5)
     return ""
-
-
-async def _acao_consultar_situacao(page: Page, item: str) -> dict:
-    return await consultar_situacao(page, item)

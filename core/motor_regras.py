@@ -588,18 +588,29 @@ def _montar_linha_resultado(incidente: dict, codigo_regra: str, equipamento: dic
     repassados do `incidente` cru. `telefone` vem de "Celular" (col. 9)
     em Rastreadores Ativos quando o equipamento foi encontrado; vazio
     quando não. `tipo_identificador`/`identificador` seguem o mesmo
-    princípio de identidade do módulo (chassi > placa). `modelo` vem do
-    mesmo `equipamento` já resolvido por placa/IMEI (col. 13 — modelo do
-    VEÍCULO, não confundir com a col. 2, modelo do rastreador) — usado por
-    `core.mensagens` como fallback quando a placa é fictícia/ausente."""
+    princípio de identidade do módulo (chassi > placa) — usado só pra
+    `tratativas` (atendente/WhatsApp), não confundir com `chassi_sga`
+    abaixo. `modelo` vem do mesmo `equipamento` já resolvido por
+    placa/IMEI (col. 13 — modelo do VEÍCULO, não confundir com a col. 2,
+    modelo do rastreador) — usado por `core.mensagens` como fallback
+    quando a placa é fictícia/ausente.
+
+    `chassi_sga` (achado 2026-08-16): o chassi CONFIRMADO via cadastro
+    (Rastreadores Ativos) — diferente de `chassi` (que pode ser um IMEI
+    ou uma placa normalizada, usado só pra dedup em `_resolver_chassi`).
+    `orchestrator.pipeline._alvos_consulta_sga` usa `chassi_sga` (nunca
+    `chassi`) pra decidir se busca por Chassi ou por Placa no SGA — o
+    campo Chassi do SGA só aceita chassi de verdade, nunca um IMEI."""
     template = templates.get(codigo_regra, {})
     valores = _valores_template(incidente, equipamento, parametros)
 
     telefone = ""
+    chassi_sga = None
     if equipamento is not None:
         telefone = normalizar_telefone_e164(
             equipamento.get(f"col_{COL_RASTREADORES_CELULAR}", "")
         ).get("e164") or ""
+        chassi_sga = equipamento.get(f"col_{COL_RASTREADORES_CHASSI}", "").strip() or None
 
     if chassi:
         tipo_identificador, identificador = TIPO_IDENTIFICADOR_CHASSI, chassi
@@ -611,6 +622,7 @@ def _montar_linha_resultado(incidente: dict, codigo_regra: str, equipamento: dic
         "placa": incidente.get("Placa", ""),
         "modelo": equipamento.get(f"col_{COL_RASTREADORES_MODELO}", "") if equipamento else "",
         "chassi": chassi or "",
+        "chassi_sga": chassi_sga,
         "imei": incidente.get("Imei", ""),
         "cliente": incidente.get("Cliente", ""),
         "codigo_regra": codigo_regra,
@@ -627,10 +639,14 @@ def _montar_linha_resultado(incidente: dict, codigo_regra: str, equipamento: dic
 
 def _equipamento_para_abertura(equipamento: dict) -> dict:
     """Formato normalizado de quem entra em `grupo_1_abrir`, usado tanto
-    pelo scan do Grupo 1 quanto pela reabertura de REGRA_ALERTA_CLIENTE."""
+    pelo scan do Grupo 1 quanto pela reabertura de REGRA_ALERTA_CLIENTE.
+    `chassi_sga` é sempre igual a `chassi` aqui — vem direto do próprio
+    `equipamento` (Rastreadores Ativos), sem ambiguidade de dedup (ver
+    `_montar_linha_resultado`)."""
     return {
         "placa": equipamento.get(f"col_{COL_RASTREADORES_PLACA}", ""),
         "chassi": equipamento.get(f"col_{COL_RASTREADORES_CHASSI}", ""),
+        "chassi_sga": equipamento.get(f"col_{COL_RASTREADORES_CHASSI}", "") or None,
         "imei": equipamento.get(f"col_{COL_RASTREADORES_IMEI}", ""),
         "cliente": equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", ""),
     }

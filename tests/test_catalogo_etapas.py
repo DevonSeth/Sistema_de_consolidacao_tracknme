@@ -512,15 +512,15 @@ async def test_continuar_apos_reconexao_prossegue_com_etapas_restantes(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_retomar_etapa_enriquecimento_sga_repassa_mapa_placas_override(monkeypatch):
-    # Achado 2026-08-16: sem repassar o mapa placa-por-identificador
-    # calculado na tentativa original, a retomada pós-queda de sessão no
-    # meio da Fase D perderia o fallback de busca por Placa justamente
-    # pros chassis que ainda faltavam.
-    mapa_recebido = {}
+async def test_retomar_etapa_enriquecimento_sga_repassa_alvos_override(monkeypatch):
+    # Achado 2026-08-16: sem repassar os alvos de consulta (tipo+valor por
+    # veículo) calculados na tentativa original, a retomada pós-queda de
+    # sessão no meio da Fase D não saberia mais se cada pendente deve ser
+    # buscado por Chassi ou por Placa.
+    alvos_recebidos = {}
 
-    async def _enriquecimento_sga_fake(chassis_override=None, mapa_placas_override=None):
-        mapa_recebido.update(mapa_placas_override or {})
+    async def _enriquecimento_sga_fake(chassis_override=None, alvos_override=None):
+        alvos_recebidos.update(alvos_override or {})
         return pipeline.ResultadoEtapa(
             "enriquecimento_sga", sucesso=True,
             dados={"situacoes_sga": {"X2": {"status": "ATIVO"}}, "falhas": []},
@@ -529,16 +529,19 @@ async def test_retomar_etapa_enriquecimento_sga_repassa_mapa_placas_override(mon
     monkeypatch.setattr(pipeline, "etapa_enriquecimento_sga", _enriquecimento_sga_fake)
 
     etapa = cat.etapa_por_id("enriquecimento_sga")
+    alvos_originais = {
+        "X1": (pipeline.TIPO_IDENTIFICADOR_CHASSI, "X1"), "X2": (pipeline.TIPO_IDENTIFICADOR_PLACA, "DEF5678"),
+    }
     resultado_travado = pipeline.ResultadoEtapa(
         "enriquecimento_sga", sucesso=False,
-        dados={"situacoes_sga": {"X1": {"status": "ATIVO"}}, "falhas": [], "mapa_placas": {"X1": "ABC1234", "X2": "DEF5678"}},
+        dados={"situacoes_sga": {"X1": {"status": "ATIVO"}}, "falhas": [], "alvos_consulta_sga": alvos_originais},
         aguardando_reconexao={"pendentes": ["X2"]},
     )
 
     resultado = await cat.retomar_etapa(etapa, resultado_travado)
 
-    assert mapa_recebido == {"X1": "ABC1234", "X2": "DEF5678"}
-    assert resultado.dados["mapa_placas"] == {"X1": "ABC1234", "X2": "DEF5678"}
+    assert alvos_recebidos == alvos_originais
+    assert resultado.dados["alvos_consulta_sga"] == alvos_originais
     assert resultado.dados["situacoes_sga"] == {"X1": {"status": "ATIVO"}, "X2": {"status": "ATIVO"}}
 
 
