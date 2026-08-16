@@ -719,6 +719,8 @@ function init() {
 
   document.getElementById("btn-cancelar").addEventListener("click", () => api().cancelar_execucao());
 
+  document.getElementById("btn-ir-tratativas").addEventListener("click", () => api().abrir_tratativas());
+
   document.getElementById("btn-continuar").addEventListener("click", () => api().continuar_apos_reconexao_manual());
 
   carregarEtapas();

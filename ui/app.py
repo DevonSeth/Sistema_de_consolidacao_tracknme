@@ -34,11 +34,18 @@ import asyncio
 import json
 import sys
 import threading
+import webbrowser
 from datetime import date
 from pathlib import Path
 
+from config import manager
 from integrations import supabase_client
 from orchestrator import catalogo_etapas, dashboards_operador, metricas_admin_operador, watchdog
+
+# gid da aba "Tratativas" na planilha Operacional — não muda ao reordenar/
+# renomear colunas, só se a aba em si for apagada e recriada (ver
+# _handoff/obter_gid_abas_botoes.py, script de descoberta read-only).
+GID_TRATATIVAS = "1481201362"
 
 STATUS_OCIOSO = "ocioso"
 STATUS_RODANDO = "rodando"
@@ -265,6 +272,13 @@ class Api:
                 return _para_json_seguro({"aceito": False, "motivo": "nao_esta_rodando"})
             _estado.cancelar_solicitado = True
         return _para_json_seguro({"aceito": True})
+
+    def abrir_tratativas(self) -> dict:
+        """Abre a aba "Tratativas" da planilha Operacional no navegador
+        padrão do sistema — botão "Ir para tratativas" do menu lateral."""
+        planilha_id = manager.carregar_config()["google_sheets"]["planilha_operacional_id"]
+        webbrowser.open(f"https://docs.google.com/spreadsheets/d/{planilha_id}/edit#gid={GID_TRATATIVAS}")
+        return _para_json_seguro({"aberto": True})
 
     def obter_progresso_atual(self) -> dict:
         with _estado.lock:

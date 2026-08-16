@@ -1,7 +1,20 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
 
-export default function AdminLayout({ children }: { children: ReactNode }) {
+import { lerSegredo } from "@/lib/vault-credenciais";
+
+// gid da aba "Instalação-Remoção" na planilha Administrador — não muda ao
+// reordenar/renomear colunas, só se a aba em si for apagada e recriada
+// (ver _handoff/obter_gid_abas_botoes.py, script de descoberta read-only).
+const GID_INSTALACAO_REMOCAO = "969551937";
+
+export default async function AdminLayout({ children }: { children: ReactNode }) {
+  const googleSheets = await lerSegredo("google_sheets");
+  const planilhaAdminId = String(googleSheets.planilha_administrador_id ?? "");
+  const urlPlanilhaAdmin = planilhaAdminId
+    ? `https://docs.google.com/spreadsheets/d/${planilhaAdminId}/edit#gid=${GID_INSTALACAO_REMOCAO}`
+    : null;
+
   return (
     <div className="app-shell">
       <nav className="sidebar">
@@ -31,6 +44,17 @@ export default function AdminLayout({ children }: { children: ReactNode }) {
         <Link className="nav-item" href="/admin/manual">
           <span className="ic">📖</span> Manual do Sistema
         </Link>
+        {urlPlanilhaAdmin && (
+          <a
+            className="nav-item"
+            href={urlPlanilhaAdmin}
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Abre a aba Instalação-Remoção no Google Sheets"
+          >
+            <span className="ic">➕</span> Adicionar Pendências
+          </a>
+        )}
         <a
           className="nav-item"
           href="tracknme-operador://abrir"
