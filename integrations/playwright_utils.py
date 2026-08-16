@@ -101,6 +101,7 @@ async def _rodar_round(
     max_tentativas: int,
     on_item_concluido: Callable[[], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_item_iniciado: Callable[[int, Any], None] | None = None,
 ) -> tuple[list[ResultadoItem], SessaoCaidaError | None, list, bool]:
     fila: asyncio.Queue = asyncio.Queue()
     for item in itens:
@@ -110,7 +111,7 @@ async def _rodar_round(
     sessao_caida: SessaoCaidaError | None = None
     cancelado = False
 
-    async def worker() -> None:
+    async def worker(worker_id: int) -> None:
         nonlocal sessao_caida, cancelado
         page = await contexto.new_page()
         try:
@@ -122,6 +123,8 @@ async def _rodar_round(
                     item = fila.get_nowait()
                 except asyncio.QueueEmpty:
                     break
+                if on_item_iniciado is not None:
+                    on_item_iniciado(worker_id, item)
                 try:
                     resultado = await _executar_com_tentativas(page, item, acao, max_tentativas)
                     resultados.append(resultado)
@@ -134,7 +137,10 @@ async def _rodar_round(
         finally:
             await page.close()
 
-    workers = [asyncio.create_task(worker()) for _ in range(min(num_workers, max(len(itens), 1)))]
+    workers = [
+        asyncio.create_task(worker(worker_id))
+        for worker_id in range(min(num_workers, max(len(itens), 1)))
+    ]
     await asyncio.gather(*workers)
 
     pendentes: list = []
@@ -152,6 +158,7 @@ async def processar_fila(
     max_tentativas: int = 3,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_item_iniciado: Callable[[int, Any], None] | None = None,
 ) -> list[ResultadoItem]:
     """Processa `itens` em paralelo usando `num_workers` páginas dentro do
     mesmo `contexto` (já autenticado, criado por quem chama).
@@ -170,6 +177,14 @@ async def processar_fila(
     `len(itens)` original. **Aproximação, não métrica de auditoria**: um
     item que precisa do round 2 conta 2x no acumulado interno — por isso o
     `min(..., total)` aqui, pra nunca reportar mais que 100%.
+
+    `on_item_iniciado(worker_id, item)` (opcional, default `None`) é
+    chamado quando um worker PEGA um item da fila, antes de processá-lo
+    (diferente de `on_progresso`, que só dispara na conclusão) — dá
+    visibilidade do que está rodando agora durante etapas longas, sem
+    depender de saber em qual round está (`worker_id` é 0..`num_workers`-1,
+    reatribuído do zero a cada round, então o mesmo callback cobre os 2
+    rounds sem distinção).
 
     `cancelar_checker()` (opcional, default `None` — sem mudança de
     comportamento pra quem não passa) é checado por cada worker antes de
@@ -192,7 +207,8 @@ async def processar_fila(
     on_item_concluido = _reportar_progresso if on_progresso is not None else None
 
     resultados_r1, sessao_caida, pendentes, cancelado = await _rodar_round(
-        contexto, itens, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker
+        contexto, itens, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker,
+        on_item_iniciado,
     )
     if sessao_caida is not None:
         raise AguardandoReconexao(pendentes=pendentes, processados=resultados_r1)
@@ -204,7 +220,8 @@ async def processar_fila(
         return resultados_r1
 
     resultados_r2, sessao_caida2, pendentes2, cancelado2 = await _rodar_round(
-        contexto, falharam, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker
+        contexto, falharam, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker,
+        on_item_iniciado,
     )
     if sessao_caida2 is not None:
         raise AguardandoReconexao(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)

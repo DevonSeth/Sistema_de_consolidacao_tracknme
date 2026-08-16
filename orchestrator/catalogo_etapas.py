@@ -40,6 +40,7 @@ class EtapaCatalogo:
     manual: bool = False
     async_: bool = True
     suporta_progresso: bool = False
+    suporta_worker_status: bool = False
     entradas: dict[str, str] = field(default_factory=dict)
     saidas: dict[str, str | None] = field(default_factory=dict)
 
@@ -65,12 +66,12 @@ CATALOGO: list[EtapaCatalogo] = [
     ),
     EtapaCatalogo(
         "abrir_incidentes_automaticos", "C", "Abrir incidentes automáticos",
-        "etapa_abrir_incidentes_automaticos", suporta_progresso=True,
+        "etapa_abrir_incidentes_automaticos", suporta_progresso=True, suporta_worker_status=True,
         entradas={"classificacao": "dados"},
     ),
     EtapaCatalogo(
         "enriquecimento_sga", "D", "Consultar SGA (login manual)",
-        "etapa_enriquecimento_sga", manual=True, suporta_progresso=True,
+        "etapa_enriquecimento_sga", manual=True, suporta_progresso=True, suporta_worker_status=True,
         entradas={"classificacao": "dados_classificacao", "instalacao_remocao": "instalacao_remocao"},
         saidas={"dados_sga": None},
     ),
@@ -88,7 +89,7 @@ CATALOGO: list[EtapaCatalogo] = [
     ),
     EtapaCatalogo(
         "fechar_incidentes_automaticos", "C", "Fechar incidentes automáticos",
-        "etapa_fechar_incidentes_automaticos", suporta_progresso=True,
+        "etapa_fechar_incidentes_automaticos", suporta_progresso=True, suporta_worker_status=True,
         entradas={"consolidacao": "dados"},
     ),
     EtapaCatalogo(
@@ -209,6 +210,7 @@ def _kwargs_com_progresso(
     contexto: dict,
     on_progresso_item: Callable[[str, int, int], None] | None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[str, int, str], None] | None = None,
 ) -> dict:
     kwargs = kwargs_para(etapa, contexto)
     if etapa.suporta_progresso:
@@ -217,6 +219,9 @@ def _kwargs_com_progresso(
             kwargs["on_progresso"] = lambda concluidos, total: on_progresso_item(etapa_id, concluidos, total)
         if cancelar_checker is not None:
             kwargs["cancelar_checker"] = cancelar_checker
+    if etapa.suporta_worker_status and on_worker_status is not None:
+        etapa_id = etapa.id
+        kwargs["on_worker_status"] = lambda worker_id, descricao: on_worker_status(etapa_id, worker_id, descricao)
     return kwargs
 
 
@@ -228,6 +233,7 @@ async def executar_etapas_com_contexto(
     on_progresso_item: Callable[[str, int, int], None] | None = None,
     on_resultado: Callable[[str, object], None] | None = None,
     execucao_id: str | None = None,
+    on_worker_status: Callable[[str, int, str], None] | None = None,
 ) -> ExecucaoCadeia:
     """Núcleo: itera `etapas`, resolve `getattr(pipeline, etapa.nome_funcao)`,
     monta kwargs (dataflow entre etapas via `kwargs_para` + progresso ao
@@ -257,7 +263,7 @@ async def executar_etapas_com_contexto(
             on_progresso(etapa.id)
 
         funcao = getattr(pipeline, etapa.nome_funcao)
-        kwargs = _kwargs_com_progresso(etapa, contexto, on_progresso_item, cancelar_checker)
+        kwargs = _kwargs_com_progresso(etapa, contexto, on_progresso_item, cancelar_checker, on_worker_status)
         iniciado_em = datetime.now(timezone.utc)
         resultado = await funcao(**kwargs) if etapa.async_ else funcao(**kwargs)
         _registrar_execucao_segura(execucao_id, etapa.id, iniciado_em, datetime.now(timezone.utc), resultado)
@@ -295,6 +301,7 @@ async def executar_cadeia(
     on_progresso_item: Callable[[str, int, int], None] | None = None,
     on_resultado: Callable[[str, object], None] | None = None,
     contexto: dict | None = None,
+    on_worker_status: Callable[[str, int, str], None] | None = None,
 ) -> ExecucaoCadeia:
     """Ponto de entrada de uma execução NOVA — adquire a trava de execução
     concorrente antes de rodar qualquer etapa; se outra máquina já estiver
@@ -311,7 +318,7 @@ async def executar_cadeia(
 
     execucao = await executar_etapas_com_contexto(
         etapas, contexto, cancelar_checker, on_progresso, on_progresso_item, on_resultado,
-        execucao_id=execucao_id,
+        execucao_id=execucao_id, on_worker_status=on_worker_status,
     )
     if execucao.motivo_parada != "aguardando_reconexao":
         supabase_client.liberar_execucao_lock()
@@ -324,6 +331,7 @@ async def retomar_etapa(
     execucao_id: str | None = None,
     on_progresso_item: Callable[[str, int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[str, int, str], None] | None = None,
 ):
     """Chamado depois que o atendente confirma reconexão manual — reprocessa
     só os `pendentes` (preservados em `resultado_travado.aguardando_reconexao`)
@@ -348,15 +356,19 @@ async def retomar_etapa(
             kwargs["on_progresso"] = lambda concluidos, total: on_progresso_item(etapa_id, concluidos, total)
         if cancelar_checker is not None:
             kwargs["cancelar_checker"] = cancelar_checker
+    if etapa.suporta_worker_status and on_worker_status is not None:
+        etapa_id = etapa.id
+        kwargs["on_worker_status"] = lambda worker_id, descricao: on_worker_status(etapa_id, worker_id, descricao)
 
     iniciado_em = datetime.now(timezone.utc)
 
     if etapa.id == "enriquecimento_sga":
         novo = await pipeline.etapa_enriquecimento_sga(chassis_override=pendentes, **kwargs)
         fundido = {**resultado_travado.dados["situacoes_sga"], **novo.dados["situacoes_sga"]}
+        falhas_fundidas = resultado_travado.dados.get("falhas", []) + novo.dados.get("falhas", [])
         resultado_final = pipeline.ResultadoEtapa(
             etapa.id, sucesso=novo.sucesso, mensagem=novo.mensagem,
-            dados={"situacoes_sga": fundido},
+            dados={"situacoes_sga": fundido, "falhas": falhas_fundidas},
             aguardando_reconexao=novo.aguardando_reconexao, cancelado=novo.cancelado,
         )
         _registrar_execucao_segura(execucao_id, etapa.id, iniciado_em, datetime.now(timezone.utc), resultado_final)
@@ -392,6 +404,7 @@ async def continuar_apos_reconexao(
     on_progresso: Callable[[str], None] | None = None,
     on_progresso_item: Callable[[str, int, int], None] | None = None,
     on_resultado: Callable[[str, object], None] | None = None,
+    on_worker_status: Callable[[str, int, str], None] | None = None,
 ) -> ExecucaoCadeia:
     """Continuação de uma cadeia pausada por `aguardando_reconexao` — chamada
     direto pela UI, NUNCA via `executar_cadeia` (a trava já está presa por
@@ -401,7 +414,9 @@ async def continuar_apos_reconexao(
     a UI guarda o `ExecucaoCadeia.execucao_id` devolvido lá pra passar de
     volta aqui, mantendo a rodada inteira sob 1 só id em `log_execucoes`."""
     execucao_id = execucao_id or str(uuid.uuid4())
-    resultado_fundido = await retomar_etapa(etapa_travada, resultado_travado, execucao_id, on_progresso_item, cancelar_checker)
+    resultado_fundido = await retomar_etapa(
+        etapa_travada, resultado_travado, execucao_id, on_progresso_item, cancelar_checker, on_worker_status
+    )
     if on_resultado is not None:
         on_resultado(etapa_travada.id, resultado_fundido)
 
@@ -428,7 +443,7 @@ async def continuar_apos_reconexao(
     registrar_saidas(etapa_travada, resultado_fundido, contexto)
     execucao_continuacao = await executar_etapas_com_contexto(
         etapas_restantes, contexto, cancelar_checker, on_progresso, on_progresso_item, on_resultado,
-        execucao_id=execucao_id,
+        execucao_id=execucao_id, on_worker_status=on_worker_status,
     )
     if execucao_continuacao.motivo_parada != "aguardando_reconexao":
         supabase_client.liberar_execucao_lock()

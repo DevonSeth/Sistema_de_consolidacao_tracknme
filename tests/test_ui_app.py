@@ -90,7 +90,7 @@ def test_status_da_etapa_cancelada():
 def test_executar_etapas_roda_e_grava_resultado(monkeypatch):
     resultado_etapa = pipeline.ResultadoEtapa("baixar_relatorios", sucesso=True, dados={"ok": True})
 
-    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None):
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
         on_progresso("baixar_relatorios")
         on_resultado("baixar_relatorios", resultado_etapa)
         return catalogo_etapas.ExecucaoCadeia(resultados=[resultado_etapa])
@@ -144,7 +144,7 @@ def test_cancelar_execucao_recusa_quando_nao_esta_rodando():
 def test_cancelar_execucao_aceita_quando_rodando(monkeypatch):
     evento_liberar = threading.Event()
 
-    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None):
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
         import asyncio
 
         await asyncio.to_thread(evento_liberar.wait)
@@ -171,7 +171,7 @@ def test_cancelar_execucao_aceita_quando_rodando(monkeypatch):
 def test_progresso_item_atualiza_durante_execucao_e_some_ao_final(monkeypatch):
     evento_liberar = threading.Event()
 
-    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None):
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
         import asyncio
 
         on_progresso("baixar_relatorios")
@@ -194,6 +194,67 @@ def test_progresso_item_atualiza_durante_execucao_e_some_ao_final(monkeypatch):
 
 
 # --------------------------------------------------------------------------
+# progresso_workers — acumula por worker, some ao final
+# --------------------------------------------------------------------------
+
+def test_progresso_workers_acumula_por_worker_id_e_some_ao_final(monkeypatch):
+    evento_liberar = threading.Event()
+
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
+        import asyncio
+
+        on_progresso("abrir_incidentes_automaticos")
+        on_worker_status("abrir_incidentes_automaticos", 0, "Placa ABC1234 — Fulano")
+        on_worker_status("abrir_incidentes_automaticos", 1, "Placa DEF5678 — Ciclano")
+        await asyncio.to_thread(evento_liberar.wait)
+        resultado = pipeline.ResultadoEtapa("abrir_incidentes_automaticos", sucesso=True)
+        on_resultado("abrir_incidentes_automaticos", resultado)
+        return catalogo_etapas.ExecucaoCadeia(resultados=[resultado])
+
+    monkeypatch.setattr(catalogo_etapas, "executar_cadeia", _executar_cadeia_fake)
+
+    app.Api().executar_etapas(["abrir_incidentes_automaticos"], "selecionadas")
+
+    _esperar(lambda: app._estado.progresso_workers is not None and len(app._estado.progresso_workers) == 2)
+    assert app._estado.progresso_workers == {0: "Placa ABC1234 — Fulano", 1: "Placa DEF5678 — Ciclano"}
+
+    evento_liberar.set()
+    _esperar(lambda: not app._estado.rodando)
+    assert app._estado.progresso_workers is None
+
+
+def test_progresso_workers_atualiza_a_mesma_entrada_sem_apagar_as_outras(monkeypatch):
+    evento_liberar = threading.Event()
+
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
+        import asyncio
+
+        on_progresso("abrir_incidentes_automaticos")
+        on_worker_status("abrir_incidentes_automaticos", 0, "Placa ABC1234 — Fulano")
+        on_worker_status("abrir_incidentes_automaticos", 1, "Placa DEF5678 — Ciclano")
+        on_worker_status("abrir_incidentes_automaticos", 0, "Placa GHI9999 — Sicrano")  # worker 0 pegou outro item
+        await asyncio.to_thread(evento_liberar.wait)
+        resultado = pipeline.ResultadoEtapa("abrir_incidentes_automaticos", sucesso=True)
+        on_resultado("abrir_incidentes_automaticos", resultado)
+        return catalogo_etapas.ExecucaoCadeia(resultados=[resultado])
+
+    monkeypatch.setattr(catalogo_etapas, "executar_cadeia", _executar_cadeia_fake)
+
+    app.Api().executar_etapas(["abrir_incidentes_automaticos"], "selecionadas")
+
+    _esperar(lambda: app._estado.progresso_workers == {0: "Placa GHI9999 — Sicrano", 1: "Placa DEF5678 — Ciclano"})
+
+    evento_liberar.set()
+    _esperar(lambda: not app._estado.rodando)
+
+
+def test_obter_progresso_atual_expoe_workers():
+    app._estado.progresso_workers = {0: "Placa ABC1234 — Fulano"}
+    resultado = app.Api().obter_progresso_atual()
+    assert resultado["workers"] == {"0": "Placa ABC1234 — Fulano"}
+
+
+# --------------------------------------------------------------------------
 # Fluxo fim-a-fim de reconexão manual
 # --------------------------------------------------------------------------
 
@@ -204,7 +265,7 @@ def test_fluxo_completo_de_reconexao_manual(monkeypatch):
         "enriquecimento_sga", sucesso=False, aguardando_reconexao={"pendentes": ["CHASSI-1"], "processados": {}}
     )
 
-    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None):
+    async def _executar_cadeia_fake(ids, modo, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None, contexto=None, on_worker_status=None):
         on_progresso("enriquecimento_sga")
         on_resultado("enriquecimento_sga", resultado_travado)
         return catalogo_etapas.ExecucaoCadeia(
@@ -233,6 +294,7 @@ def test_fluxo_completo_de_reconexao_manual(monkeypatch):
     async def _continuar_apos_reconexao_fake(
         etapa_travada, contexto, resultado_travado_arg, etapas_restantes,
         execucao_id=None, cancelar_checker=None, on_progresso=None, on_progresso_item=None, on_resultado=None,
+        on_worker_status=None,
     ):
         assert etapa_travada.id == "enriquecimento_sga"
         assert etapas_restantes == [etapa_seguinte]
@@ -289,6 +351,23 @@ def test_listar_etapas_com_status_mensagem_erro_so_aparece_em_falha_real(monkeyp
     assert por_id[etapa_erro.id] == "Falha ao baixar relatório(s): [...]"
     assert por_id[etapa_sucesso.id] is None
     assert por_id[etapa_cancelada.id] is None
+
+
+def test_listar_etapas_com_status_expoe_falhas_item_mesmo_com_sucesso_geral(monkeypatch):
+    monkeypatch.setattr(app.supabase_client, "contar_pendencias_por_origem", lambda: {})
+    etapa_com_falha, etapa_sem_falha = catalogo_etapas.CATALOGO[0:2]
+    app._estado.resultados = {
+        etapa_com_falha.id: pipeline.ResultadoEtapa(
+            etapa_com_falha.id, sucesso=True,
+            dados={"abertos": [], "falhas": [{"descricao": "Placa ABC1234 — Fulano", "erro": "Contrato inativo"}]},
+        ),
+        etapa_sem_falha.id: pipeline.ResultadoEtapa(etapa_sem_falha.id, sucesso=True, dados={"abertos": []}),
+    }
+
+    por_id = {e["id"]: e["falhas_item"] for e in app.Api().listar_etapas_com_status()["etapas"]}
+
+    assert por_id[etapa_com_falha.id] == [{"descricao": "Placa ABC1234 — Fulano", "erro": "Contrato inativo"}]
+    assert por_id[etapa_sem_falha.id] is None
 
 
 # --------------------------------------------------------------------------
@@ -372,6 +451,7 @@ def test_obter_progresso_atual_sempre_serializavel():
         "etapa_travada_id": None,
         "etapas_restantes": [],
         "progresso_item": None,
+        "workers": None,
         "erro_geral": None,
         "mensagem_etapa_travada": None,
     }

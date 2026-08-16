@@ -64,7 +64,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import holidays
 from playwright.async_api import async_playwright
@@ -244,6 +244,8 @@ async def _processar_fila_com_navegador(
     acao,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    descrever_item: Callable[[Any], str] | None = None,
+    on_worker_status: Callable[[int, str], None] | None = None,
 ) -> tuple[
     list, str | None, "playwright_utils.AguardandoReconexao | None", "playwright_utils.CancelamentoSolicitado | None"
 ]:
@@ -262,13 +264,26 @@ async def _processar_fila_com_navegador(
     quem chamou deve devolver `ResultadoEtapa(sucesso=False,
     mensagem=erro)` sem tentar ler `resultados`. `on_progresso`/
     `cancelar_checker` (opcionais) repassam direto pra
-    `playwright_utils.processar_fila` — ver docstring de lá."""
+    `playwright_utils.processar_fila` — ver docstring de lá.
+
+    `descrever_item`/`on_worker_status` (opcionais): quando informados,
+    monta o `on_item_iniciado(worker_id, item)` de `processar_fila`
+    convertendo `item` num texto legível (`descrever_item`, default
+    `str`) antes de repassar pro chamador — `playwright_utils` continua
+    sem saber a forma do item (`linha` dict pra incidentes, chassi string
+    pro SGA), só quem chama aqui sabe."""
+    on_item_iniciado = None
+    if on_worker_status is not None:
+        descrever = descrever_item or str
+        on_item_iniciado = lambda worker_id, item: on_worker_status(worker_id, descrever(item))  # noqa: E731
+
     try:
         async with async_playwright() as playwright:
             browser, context = await tracknme_bot.abrir_navegador_autenticado(playwright)
             try:
                 resultados = await playwright_utils.processar_fila(
-                    context, itens, acao, on_progresso=on_progresso, cancelar_checker=cancelar_checker
+                    context, itens, acao, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                    on_item_iniciado=on_item_iniciado,
                 )
             finally:
                 await context.close()
@@ -282,39 +297,69 @@ async def _processar_fila_com_navegador(
     return resultados, None, None, None
 
 
+def _descrever_linha_incidente(linha: dict) -> str:
+    return f"Placa {linha.get('placa', '—')} — {linha.get('cliente', '—')}"
+
+
+def _descrever_chassi_sga(chassi: str) -> str:
+    return f"Chassi {chassi}"
+
+
+def _falhas_com_descricao(resultados: list, descrever_item: Callable[[Any], str]) -> list[dict]:
+    """Formato comum de `dados["falhas"]` (item cru + erro + descrição
+    legível) — usado por `etapa_enriquecimento_sga` nos 3 desfechos
+    (sucesso parcial, reconexão, cancelamento)."""
+    return [
+        {"item": r.item, "erro": r.erro, "descricao": descrever_item(r.item)}
+        for r in resultados if not r.sucesso
+    ]
+
+
 def _resultado_aguardando_reconexao(
-    etapa: str, reconexao: "playwright_utils.AguardandoReconexao", chave_sucesso: str
+    etapa: str, reconexao: "playwright_utils.AguardandoReconexao", chave_sucesso: str,
+    descrever_item: Callable[[Any], str] | None = None,
 ) -> ResultadoEtapa:
     """Monta o `ResultadoEtapa` de uma queda de sessão a partir de
     `reconexao.processados` (itens que já tinham resultado antes da
     queda) — mesmo padrão de separação sucesso/falha já usado no
     caminho normal (`[r.resultado["linha"] for r in resultados if
-    r.sucesso]`)."""
+    r.sucesso]`). `descrever_item` (opcional) preenche `"descricao"` em
+    cada falha, mesmo formato usado no caminho normal (ver
+    `_descrever_linha_incidente`)."""
+    descrever = descrever_item or str
     return ResultadoEtapa(
         etapa,
         sucesso=False,
         mensagem=f"Sessão caída — aguardando reconexão manual ({len(reconexao.pendentes)} pendente(s)).",
         dados={
             chave_sucesso: [r.resultado["linha"] for r in reconexao.processados if r.sucesso],
-            "falhas": [{"linha": r.item, "erro": r.erro} for r in reconexao.processados if not r.sucesso],
+            "falhas": [
+                {"linha": r.item, "erro": r.erro, "descricao": descrever(r.item)}
+                for r in reconexao.processados if not r.sucesso
+            ],
         },
         aguardando_reconexao={"pendentes": reconexao.pendentes},
     )
 
 
 def _resultado_cancelado(
-    etapa: str, cancelamento: "playwright_utils.CancelamentoSolicitado", chave_sucesso: str
+    etapa: str, cancelamento: "playwright_utils.CancelamentoSolicitado", chave_sucesso: str,
+    descrever_item: Callable[[Any], str] | None = None,
 ) -> ResultadoEtapa:
     """Mesmo padrão de `_resultado_aguardando_reconexao`, mas pra
     cancelamento pedido pelo usuário no meio do processamento da fila —
     nunca retomada automática, quem chama trata como parada definitiva."""
+    descrever = descrever_item or str
     return ResultadoEtapa(
         etapa,
         sucesso=False,
         mensagem=f"Cancelado pelo usuário ({len(cancelamento.pendentes)} pendente(s)).",
         dados={
             chave_sucesso: [r.resultado["linha"] for r in cancelamento.processados if r.sucesso],
-            "falhas": [{"linha": r.item, "erro": r.erro} for r in cancelamento.processados if not r.sucesso],
+            "falhas": [
+                {"linha": r.item, "erro": r.erro, "descricao": descrever(r.item)}
+                for r in cancelamento.processados if not r.sucesso
+            ],
         },
         cancelado={"pendentes": cancelamento.pendentes},
     )
@@ -324,6 +369,7 @@ async def etapa_abrir_incidentes_automaticos(
     dados: dict | None = None,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[int, str], None] | None = None,
 ) -> ResultadoEtapa:
     """`dados` é o retorno de `etapa_motor_de_regras().dados` (só lê
     `grupo_1_abrir`). Se `None` (rodando isolada no painel), chama
@@ -331,7 +377,9 @@ async def etapa_abrir_incidentes_automaticos(
     existe planilha/disco pra reler como nas fases anteriores.
     `on_progresso`/`cancelar_checker` (opcionais) repassam pro
     `processar_fila` subjacente — ver
-    `integrations.playwright_utils.processar_fila`."""
+    `integrations.playwright_utils.processar_fila`. `on_worker_status`
+    (opcional) reporta o que cada worker está processando agora
+    (`"Placa X — Cliente Y"`), ver `_processar_fila_com_navegador`."""
     if dados is None:
         resultado_motor = etapa_motor_de_regras()
         if not resultado_motor.sucesso:
@@ -341,12 +389,17 @@ async def etapa_abrir_incidentes_automaticos(
         dados = resultado_motor.dados
 
     resultados, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
-        dados["grupo_1_abrir"], _acao_abrir, on_progresso=on_progresso, cancelar_checker=cancelar_checker
+        dados["grupo_1_abrir"], _acao_abrir, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+        descrever_item=_descrever_linha_incidente, on_worker_status=on_worker_status,
     )
     if reconexao is not None:
-        return _resultado_aguardando_reconexao("abrir_incidentes_automaticos", reconexao, "abertos")
+        return _resultado_aguardando_reconexao(
+            "abrir_incidentes_automaticos", reconexao, "abertos", _descrever_linha_incidente
+        )
     if cancelamento is not None:
-        return _resultado_cancelado("abrir_incidentes_automaticos", cancelamento, "abertos")
+        return _resultado_cancelado(
+            "abrir_incidentes_automaticos", cancelamento, "abertos", _descrever_linha_incidente
+        )
     if erro is not None:
         return ResultadoEtapa("abrir_incidentes_automaticos", sucesso=False, mensagem=erro)
 
@@ -355,7 +408,10 @@ async def etapa_abrir_incidentes_automaticos(
         sucesso=True,
         dados={
             "abertos": [r.resultado["linha"] for r in resultados if r.sucesso],
-            "falhas": [{"linha": r.item, "erro": r.erro} for r in resultados if not r.sucesso],
+            "falhas": [
+                {"linha": r.item, "erro": r.erro, "descricao": _descrever_linha_incidente(r.item)}
+                for r in resultados if not r.sucesso
+            ],
         },
     )
 
@@ -364,6 +420,7 @@ async def etapa_fechar_incidentes_automaticos(
     dados: dict | None = None,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[int, str], None] | None = None,
 ) -> ResultadoEtapa:
     """`dados` é o retorno de `etapa_consolidar_com_sga().dados` (só lê
     `grupo_2_concluir`, já recalculado com o SGA). Se `None` (rodando
@@ -377,7 +434,8 @@ async def etapa_fechar_incidentes_automaticos(
     `MultiplosIncidentesAbertosError` não têm tratamento diferenciado
     (decisão do usuário) — seguem o retry padrão de `processar_fila`
     igual qualquer outra falha de item. `on_progresso`/`cancelar_checker`
-    (opcionais) repassam pro `processar_fila` subjacente.
+    (opcionais) repassam pro `processar_fila` subjacente. `on_worker_status`
+    (opcional) reporta o que cada worker está processando agora.
     """
     if dados is None:
         resultado_consolidacao = await etapa_consolidar_com_sga()
@@ -388,12 +446,17 @@ async def etapa_fechar_incidentes_automaticos(
         dados = resultado_consolidacao.dados
 
     resultados, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
-        dados["grupo_2_concluir"], _acao_concluir, on_progresso=on_progresso, cancelar_checker=cancelar_checker
+        dados["grupo_2_concluir"], _acao_concluir, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+        descrever_item=_descrever_linha_incidente, on_worker_status=on_worker_status,
     )
     if reconexao is not None:
-        return _resultado_aguardando_reconexao("fechar_incidentes_automaticos", reconexao, "concluidos")
+        return _resultado_aguardando_reconexao(
+            "fechar_incidentes_automaticos", reconexao, "concluidos", _descrever_linha_incidente
+        )
     if cancelamento is not None:
-        return _resultado_cancelado("fechar_incidentes_automaticos", cancelamento, "concluidos")
+        return _resultado_cancelado(
+            "fechar_incidentes_automaticos", cancelamento, "concluidos", _descrever_linha_incidente
+        )
     if erro is not None:
         return ResultadoEtapa("fechar_incidentes_automaticos", sucesso=False, mensagem=erro)
 
@@ -402,7 +465,10 @@ async def etapa_fechar_incidentes_automaticos(
         sucesso=True,
         dados={
             "concluidos": [r.resultado["linha"] for r in resultados if r.sucesso],
-            "falhas": [{"linha": r.item, "erro": r.erro} for r in resultados if not r.sucesso],
+            "falhas": [
+                {"linha": r.item, "erro": r.erro, "descricao": _descrever_linha_incidente(r.item)}
+                for r in resultados if not r.sucesso
+            ],
         },
     )
 
@@ -458,6 +524,7 @@ async def etapa_enriquecimento_sga(
     chassis_override: list[str] | None = None,
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[int, str], None] | None = None,
 ) -> ResultadoEtapa:
     """Única etapa manual (login no SGA exige captcha) — cobre Manutenção,
     Instalação e Remoção numa consulta só, decisão do usuário: `dados_
@@ -484,8 +551,12 @@ async def etapa_enriquecimento_sga(
     Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`),
     os chassis que já tinham resultado ANTES da queda são persistidos
     mesmo assim — só os `pendentes` voltam pra tela pedir reconexão
-    manual. `on_progresso` (opcional) repassa pro `processar_fila`
-    subjacente.
+    manual. `on_progresso`/`on_worker_status` (opcionais) repassam pro
+    `processar_fila` subjacente — `on_worker_status` reporta o chassi que
+    cada worker está consultando agora. `dados["falhas"]` lista os
+    chassis que não tiveram sucesso na consulta (antes descartados
+    silenciosamente por `_persistir_situacoes_sga`, que só grava quem
+    teve sucesso).
     """
     if chassis_override is not None:
         chassis = chassis_override
@@ -501,6 +572,10 @@ async def etapa_enriquecimento_sga(
             )
         chassis = _chassis_para_consultar_sga(dados_classificacao, instalacao_remocao)
 
+    on_item_iniciado = None
+    if on_worker_status is not None:
+        on_item_iniciado = lambda worker_id, chassi: on_worker_status(worker_id, _descrever_chassi_sga(chassi))  # noqa: E731
+
     try:
         async with async_playwright() as playwright:
             browser, context = await sga_bot.aguardar_login_manual(playwright)
@@ -508,6 +583,7 @@ async def etapa_enriquecimento_sga(
                 resultados = await playwright_utils.processar_fila(
                     context, chassis, sga_bot.consultar_situacao,
                     on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                    on_item_iniciado=on_item_iniciado,
                 )
             finally:
                 await context.close()
@@ -519,7 +595,10 @@ async def etapa_enriquecimento_sga(
             "enriquecimento_sga",
             sucesso=False,
             mensagem=f"Sessão caída — aguardando reconexão manual ({len(e.pendentes)} pendente(s)).",
-            dados={"situacoes_sga": situacoes_sga},
+            dados={
+                "situacoes_sga": situacoes_sga,
+                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+            },
             aguardando_reconexao={"pendentes": e.pendentes},
         )
     except playwright_utils.CancelamentoSolicitado as e:
@@ -528,14 +607,24 @@ async def etapa_enriquecimento_sga(
             "enriquecimento_sga",
             sucesso=False,
             mensagem=f"Cancelado pelo usuário ({len(e.pendentes)} pendente(s)).",
-            dados={"situacoes_sga": situacoes_sga},
+            dados={
+                "situacoes_sga": situacoes_sga,
+                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+            },
             cancelado={"pendentes": e.pendentes},
         )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
         return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
 
     situacoes_sga = _persistir_situacoes_sga(resultados, datetime.now())
-    return ResultadoEtapa("enriquecimento_sga", sucesso=True, dados={"situacoes_sga": situacoes_sga})
+    return ResultadoEtapa(
+        "enriquecimento_sga",
+        sucesso=True,
+        dados={
+            "situacoes_sga": situacoes_sga,
+            "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga),
+        },
+    )
 
 
 async def etapa_consolidar_com_sga(

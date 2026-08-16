@@ -205,6 +205,66 @@ async def test_sem_cancelar_checker_comportamento_identico_ao_padrao():
 
 
 @pytest.mark.asyncio
+async def test_on_item_iniciado_reporta_worker_id_e_item_antes_de_processar():
+    chamadas = []
+
+    async def acao(page, item):
+        return item
+
+    resultados = await processar_fila(
+        ContextoFalso(), ["a", "b", "c"], acao, num_workers=1,
+        on_item_iniciado=lambda worker_id, item: chamadas.append((worker_id, item)),
+    )
+
+    assert len(resultados) == 3
+    # num_workers=1 -> ordem determinística, worker 0 sempre
+    assert chamadas == [(0, "a"), (0, "b"), (0, "c")]
+
+
+@pytest.mark.asyncio
+async def test_on_item_iniciado_usa_worker_id_dentro_do_intervalo_valido():
+    chamadas = []
+
+    async def acao(page, item):
+        await asyncio.sleep(0.001)
+        return item
+
+    itens = list(range(10))
+    resultados = await processar_fila(
+        ContextoFalso(), itens, acao, num_workers=3,
+        on_item_iniciado=lambda worker_id, item: chamadas.append((worker_id, item)),
+    )
+
+    assert len(resultados) == 10
+    assert len(chamadas) == 10
+    assert all(0 <= worker_id < 3 for worker_id, _ in chamadas)
+    assert sorted(item for _, item in chamadas) == itens
+
+
+@pytest.mark.asyncio
+async def test_on_item_iniciado_dispara_de_novo_no_round2_pro_mesmo_item():
+    tentativas_totais = {}
+    chamadas = []
+
+    async def acao(page, item):
+        tentativas_totais[item] = tentativas_totais.get(item, 0) + 1
+        if tentativas_totais[item] < 4:
+            raise RuntimeError("falha")
+        return "recuperado"
+
+    resultados = await processar_fila(
+        ContextoFalso(), ["a"], acao, num_workers=1, max_tentativas=3,
+        on_item_iniciado=lambda worker_id, item: chamadas.append((worker_id, item)),
+    )
+
+    assert resultados[0].sucesso is True
+    # 1x quando o worker pega o item no round 1 (falha as 3 tentativas
+    # internas), 1x de novo quando o round 2 pega o mesmo item de volta —
+    # nunca 1x por tentativa interna de `_executar_com_tentativas`.
+    assert chamadas == [(0, "a"), (0, "a")]
+
+
+@pytest.mark.asyncio
 async def test_varios_workers_processam_tudo_sem_perder_item():
     contador_paginas_abertas = 0
 

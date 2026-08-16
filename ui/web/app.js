@@ -136,6 +136,20 @@ function renderizarCard(etapa) {
     card.appendChild(erro);
   }
 
+  // Falhas por item que persistiram depois dos retries — aparece mesmo com
+  // a etapa em status de sucesso (alguns itens falharam, outros não).
+  if (etapa.falhas_item && etapa.falhas_item.length > 0) {
+    const bloco = document.createElement("div");
+    bloco.className = "card-etapa-falhas";
+    etapa.falhas_item.forEach((falha) => {
+      const linha = document.createElement("div");
+      linha.className = "card-etapa-falhas-item";
+      linha.textContent = `${falha.descricao ?? "Item"} — ${falha.erro ?? "erro desconhecido"}`;
+      bloco.appendChild(linha);
+    });
+    card.appendChild(bloco);
+  }
+
   return card;
 }
 
@@ -169,10 +183,11 @@ async function executar(listaIds, modo) {
 
 function limparProgressoDosCards() {
   document.querySelectorAll(".card-etapa-progresso").forEach((el) => el.remove());
+  document.querySelectorAll(".card-etapa-workers").forEach((el) => el.remove());
 }
 
 function mostrarProgressoNoCard(etapaId, concluidos, total) {
-  limparProgressoDosCards();
+  document.querySelectorAll(".card-etapa-progresso").forEach((el) => el.remove());
   const card = document.querySelector(`.card-etapa[data-etapa-id="${etapaId}"]`);
   if (!card) return;
   const etapa = etapasCache.find((e) => e.id === etapaId);
@@ -183,6 +198,25 @@ function mostrarProgressoNoCard(etapaId, concluidos, total) {
     <div class="trilho"><div class="fill" style="width:${pct}%"></div></div>
     <div class="texto">${etapa?.label ?? etapaId} — ${pct}%</div>
   `;
+  card.appendChild(bloco);
+}
+
+/** Mostra o que cada worker está processando agora (evita a sensação de
+ * travamento em etapas longas, ex: round 2 de retry em `processar_fila`,
+ * que trava a % em 100% mas continua rodando de verdade) — `workers` é
+ * `{worker_id: descricao}`, vindo de `Api.obter_progresso_atual().workers`. */
+function mostrarWorkersNoCard(etapaId, workers) {
+  document.querySelectorAll(".card-etapa-workers").forEach((el) => el.remove());
+  if (!etapaId || !workers) return;
+  const card = document.querySelector(`.card-etapa[data-etapa-id="${etapaId}"]`);
+  if (!card) return;
+  const ids = Object.keys(workers).map(Number).sort((a, b) => a - b);
+  if (ids.length === 0) return;
+  const bloco = document.createElement("div");
+  bloco.className = "card-etapa-workers";
+  bloco.innerHTML = ids
+    .map((id) => `<div>Worker ${id + 1}: ${workers[id]}</div>`)
+    .join("");
   card.appendChild(bloco);
 }
 
@@ -230,6 +264,7 @@ async function pollProgresso() {
 
   if (progresso.progresso_item) {
     mostrarProgressoNoCard(progresso.progresso_item.etapa_id, progresso.progresso_item.concluidos, progresso.progresso_item.total);
+    mostrarWorkersNoCard(progresso.progresso_item.etapa_id, progresso.workers);
   } else {
     limparProgressoDosCards();
   }

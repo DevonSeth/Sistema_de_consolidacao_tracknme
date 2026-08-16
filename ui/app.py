@@ -92,6 +92,7 @@ class _EstadoExecucao:
         self.contexto: dict = {}
         self.erro_geral: str | None = None
         self.progresso_item: dict | None = None
+        self.progresso_workers: dict[int, str] | None = None
         self.cancelar_solicitado = False
         self.execucao_id: str | None = None
 
@@ -145,6 +146,7 @@ def _on_progresso(etapa_id: str) -> None:
     with _estado.lock:
         _estado.etapa_atual_id = etapa_id
         _estado.progresso_item = None
+        _estado.progresso_workers = None
 
 
 def _on_progresso_item(etapa_id: str, concluidos: int, total: int) -> None:
@@ -152,10 +154,23 @@ def _on_progresso_item(etapa_id: str, concluidos: int, total: int) -> None:
         _estado.progresso_item = {"etapa_id": etapa_id, "concluidos": concluidos, "total": total}
 
 
+def _on_worker_status(etapa_id: str, worker_id: int, descricao: str) -> None:
+    """Reportado quando um worker PEGA um item (ver `orchestrator.
+    catalogo_etapas`/`integrations.playwright_utils.processar_fila`) —
+    cada worker atualiza só sua própria entrada, sem apagar as dos
+    outros, então a tela sempre mostra o último item que cada worker
+    começou a processar, mesmo em execuções longas com retry (round 2)."""
+    with _estado.lock:
+        if _estado.progresso_workers is None:
+            _estado.progresso_workers = {}
+        _estado.progresso_workers[worker_id] = descricao
+
+
 def _on_resultado(etapa_id: str, resultado) -> None:
     with _estado.lock:
         _estado.resultados[etapa_id] = resultado
         _estado.progresso_item = None
+        _estado.progresso_workers = None
 
 
 async def _rodar_cadeia(lista_ids: list[str] | None, modo: str) -> None:
@@ -168,6 +183,7 @@ async def _rodar_cadeia(lista_ids: list[str] | None, modo: str) -> None:
             on_progresso_item=_on_progresso_item,
             on_resultado=_on_resultado,
             contexto=_estado.contexto,
+            on_worker_status=_on_worker_status,
         )
         _finalizar_execucao(execucao)
     except Exception as exc:  # nunca deixa a thread do loop morrer silenciosa
@@ -175,6 +191,7 @@ async def _rodar_cadeia(lista_ids: list[str] | None, modo: str) -> None:
             _estado.rodando = False
             _estado.erro_geral = str(exc)
             _estado.progresso_item = None
+            _estado.progresso_workers = None
 
 
 async def _continuar_cadeia(etapa_travada, resultado_travado, etapas_restantes: list, execucao_id: str | None) -> None:
@@ -189,6 +206,7 @@ async def _continuar_cadeia(etapa_travada, resultado_travado, etapas_restantes: 
             on_progresso=_on_progresso,
             on_progresso_item=_on_progresso_item,
             on_resultado=_on_resultado,
+            on_worker_status=_on_worker_status,
         )
         _finalizar_execucao(execucao)
     except Exception as exc:
@@ -196,6 +214,7 @@ async def _continuar_cadeia(etapa_travada, resultado_travado, etapas_restantes: 
             _estado.rodando = False
             _estado.erro_geral = str(exc)
             _estado.progresso_item = None
+            _estado.progresso_workers = None
 
 
 def _finalizar_execucao(execucao: catalogo_etapas.ExecucaoCadeia) -> None:
@@ -209,6 +228,7 @@ def _finalizar_execucao(execucao: catalogo_etapas.ExecucaoCadeia) -> None:
             execucao.resultados[-1] if execucao.motivo_parada == "aguardando_reconexao" and execucao.resultados else None
         )
         _estado.progresso_item = None
+        _estado.progresso_workers = None
 
 
 class Api:
@@ -230,6 +250,14 @@ class Api:
                         # em vez de só o selo genérico "Erro".
                         "mensagem_erro": (
                             resultado.mensagem if resultado is not None and not resultado.sucesso and resultado.cancelado is None else None
+                        ),
+                        # Falhas por item que persistiram depois dos retries
+                        # (`ResultadoEtapa.dados["falhas"]`) — aparece mesmo
+                        # quando a etapa como um todo teve sucesso (alguns
+                        # itens falharam, outros não), pro atendente poder
+                        # corrigir o que precisar.
+                        "falhas_item": (
+                            resultado.dados.get("falhas") if resultado is not None and resultado.dados else None
                         ),
                     }
                 )
@@ -261,6 +289,7 @@ class Api:
             _estado.contexto = {}
             _estado.erro_geral = None
             _estado.progresso_item = None
+            _estado.progresso_workers = None
             _estado.cancelar_solicitado = False
             _estado.execucao_id = None
 
@@ -313,6 +342,7 @@ class Api:
                     "etapa_travada_id": _estado.etapa_travada_id,
                     "etapas_restantes": [etapa.id for etapa in _estado.etapas_restantes],
                     "progresso_item": _estado.progresso_item,
+                    "workers": _estado.progresso_workers,
                     "erro_geral": _estado.erro_geral,
                     # `mensagem` de `ResultadoEtapa` já vem formatada com a
                     # contagem de pendentes (ex: "... aguardando reconexão
@@ -333,6 +363,7 @@ class Api:
             _estado.rodando = True
             _estado.motivo_parada = None
             _estado.progresso_item = None
+            _estado.progresso_workers = None
             _estado.cancelar_solicitado = False
 
         _obter_loop().submeter(_continuar_cadeia(etapa_travada, resultado_travado, etapas_restantes, execucao_id))

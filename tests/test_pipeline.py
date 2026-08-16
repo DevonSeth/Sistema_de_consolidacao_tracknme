@@ -386,7 +386,7 @@ def _preparar_mocks_playwright(monkeypatch):
 async def test_processar_fila_com_navegador_propaga_aguardando_reconexao(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_reconexao(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_reconexao(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.AguardandoReconexao(
             pendentes=["item-pendente"],
             processados=[
@@ -413,7 +413,7 @@ async def test_processar_fila_com_navegador_propaga_aguardando_reconexao(monkeyp
 async def test_processar_fila_com_navegador_propaga_cancelamento(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=["item-pendente"],
             processados=[
@@ -466,6 +466,35 @@ async def test_etapa_abrir_incidentes_automaticos_falha_de_item_nao_derruba_a_et
     assert len(resultado.dados["falhas"]) == 1
     assert resultado.dados["falhas"][0]["linha"] == _GRUPO_1_ABRIR_FAKE[0]
     assert "Veículo não encontrado" in resultado.dados["falhas"][0]["erro"]
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_falha_inclui_descricao(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)
+
+    async def _abrir_incidente_falha(page, placa, cliente):
+        raise RuntimeError("Veículo não encontrado ou contrato inativo")
+
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente", _abrir_incidente_falha)
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(_DADOS_GRUPOS_FAKE)
+
+    assert resultado.dados["falhas"][0]["descricao"] == "Placa ABC1234 — Fulano"
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_repassa_on_worker_status(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente", _sempre_sucesso)
+    chamadas = []
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(
+        _DADOS_GRUPOS_FAKE,
+        on_worker_status=lambda worker_id, descricao: chamadas.append((worker_id, descricao)),
+    )
+
+    assert resultado.sucesso is True
+    assert chamadas == [(0, "Placa ABC1234 — Fulano")]
 
 
 @pytest.mark.asyncio
@@ -569,7 +598,7 @@ async def test_etapa_abrir_incidentes_automaticos_sessao_caida_preserva_sucesso_
 async def test_etapa_abrir_incidentes_automaticos_cancelado_preserva_sucesso_anterior(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=[{"placa": "PENDENTE"}],
             processados=[
@@ -653,7 +682,7 @@ async def test_etapa_fechar_incidentes_automaticos_sessao_caida_preserva_sucesso
 async def test_etapa_fechar_incidentes_automaticos_cancelado_preserva_sucesso_anterior(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=[{"placa": "PENDENTE"}],
             processados=[
@@ -706,6 +735,22 @@ async def test_etapa_fechar_incidentes_automaticos_falha_de_item_nao_derruba_a_e
     assert resultado.dados["concluidos"] == []
     assert len(resultado.dados["falhas"]) == 1
     assert resultado.dados["falhas"][0]["linha"] == _GRUPO_2_CONCLUIR_FAKE[0]
+    assert resultado.dados["falhas"][0]["descricao"] == "Placa DEF5678 — Ciclano"
+
+
+@pytest.mark.asyncio
+async def test_etapa_fechar_incidentes_automaticos_repassa_on_worker_status(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(orch.tracknme_bot, "concluir_incidente", _sempre_sucesso)
+    chamadas = []
+
+    resultado = await orch.etapa_fechar_incidentes_automaticos(
+        _DADOS_GRUPOS_FAKE,
+        on_worker_status=lambda worker_id, descricao: chamadas.append((worker_id, descricao)),
+    )
+
+    assert resultado.sucesso is True
+    assert chamadas == [(0, "Placa DEF5678 — Ciclano")]
 
 
 @pytest.mark.asyncio
@@ -835,6 +880,35 @@ async def test_etapa_enriquecimento_sga_ignora_chassi_com_falha_de_consulta(monk
     assert resultado.sucesso is True
     assert "X1" not in resultado.dados["situacoes_sga"]
     assert resultado.dados["situacoes_sga"]["X2"]["status"] == "INATIVO"
+    # X1 não vira mais um chassi descartado em silêncio — aparece em "falhas"
+    # com o erro real, pro atendente poder agir.
+    assert len(resultado.dados["falhas"]) == 1
+    assert resultado.dados["falhas"][0]["item"] == "X1"
+    assert resultado.dados["falhas"][0]["descricao"] == "Chassi X1"
+    assert "Status do veículo não carregou" in resultado.dados["falhas"][0]["erro"]
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_repassa_on_worker_status(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+
+    async def _consultar_situacao_fake(page, chassi):
+        return {"status": "ATIVO", "cidade": "", "bairro": ""}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+    chamadas = []
+
+    resultado = await orch.etapa_enriquecimento_sga(
+        _DADOS_GRUPOS_FAKE, [],
+        on_worker_status=lambda worker_id, descricao: chamadas.append((worker_id, descricao)),
+    )
+
+    assert resultado.sucesso is True
+    # Sem um yield real na acao fake, não dá pra garantir qual worker pega
+    # qual chassi (poderia até ser só o worker 0 processando os 2, se
+    # nenhum outro tiver chance de rodar antes da fila esvaziar) — só
+    # confere que os 2 chassis foram reportados, com descrição certa.
+    assert sorted(descricao for _, descricao in chamadas) == ["Chassi X1", "Chassi X2"]
 
 
 @pytest.mark.asyncio
@@ -915,7 +989,7 @@ async def test_etapa_enriquecimento_sga_sessao_caida_persiste_sucessos_antes_da_
         orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: persistidos.append(dados["chassi"])
     )
 
-    async def _processar_fila_levanta_reconexao(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_reconexao(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.AguardandoReconexao(
             pendentes=["X2"],
             processados=[
@@ -945,7 +1019,7 @@ async def test_etapa_enriquecimento_sga_cancelado_persiste_sucessos_antes_do_can
         orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: persistidos.append(dados["chassi"])
     )
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=["X2"],
             processados=[

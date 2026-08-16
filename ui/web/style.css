@@ -547,7 +547,16 @@ body {
 .card-etapa-progresso .fill { height: 100%; background: var(--status-rodando-fg); transition: width 0.25s ease; }
 .card-etapa-progresso .texto { font-size: 11px; color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono); }
 
+/* O que cada worker está processando agora (evita sensação de travamento
+   em etapas longas, ex: round 2 de retry em processar_fila) */
+.card-etapa-workers { margin-top: 6px; font-size: 11px; color: var(--text-muted); font-family: var(--font-mono); line-height: 1.5; }
+
 .card-etapa-erro { margin-top: 9px; font-size: 12px; color: var(--status-erro-fg); }
+
+/* Falhas por item que persistiram depois dos retries (Fase 4 +
+   observabilidade nova) — lista, diferente de .card-etapa-erro (texto único) */
+.card-etapa-falhas { margin-top: 9px; }
+.card-etapa-falhas-item { font-size: 12px; color: var(--status-erro-fg); margin-top: 2px; }
 
 .rodape-creditos { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 
