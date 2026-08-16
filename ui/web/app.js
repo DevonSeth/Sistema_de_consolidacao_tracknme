@@ -702,7 +702,7 @@ function mostrarSecao(nome) {
 // Wiring inicial
 // --------------------------------------------------------------------------
 
-function init() {
+function inicializarAppAutenticado() {
   document.querySelectorAll(".nav-item[data-section]").forEach((btn) =>
     btn.addEventListener("click", () => mostrarSecao(btn.dataset.section))
   );
@@ -733,6 +733,26 @@ function init() {
   pollProgresso();
   setInterval(pollProgresso, 800);
   setInterval(carregarWatchdog, 15000);
+}
+
+function init() {
+  document.getElementById("form-login").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const email = document.getElementById("login-email").value.trim();
+    const senha = document.getElementById("login-senha").value;
+    const erroEl = document.getElementById("login-erro");
+    erroEl.hidden = true;
+
+    const resultado = await api().autenticar(email, senha);
+    if (!resultado.sucesso) {
+      erroEl.textContent = resultado.erro;
+      erroEl.hidden = false;
+      return;
+    }
+
+    document.getElementById("login-overlay").remove();
+    inicializarAppAutenticado();
+  });
 }
 
 window.addEventListener("pywebviewready", init);

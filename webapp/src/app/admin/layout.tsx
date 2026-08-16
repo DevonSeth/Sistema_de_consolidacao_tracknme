@@ -3,6 +3,8 @@ import Link from "next/link";
 
 import { lerSegredo } from "@/lib/vault-credenciais";
 
+import { signOutAction } from "../login/actions";
+
 // gid da aba "Instalação-Remoção" na planilha Administrador — não muda ao
 // reordenar/renomear colunas, só se a aba em si for apagada e recriada
 // (ver _handoff/obter_gid_abas_botoes.py, script de descoberta read-only).
@@ -65,6 +67,11 @@ export default async function AdminLayout({ children }: { children: ReactNode })
 
         <div className="sidebar-footer">
           <div className="papel">👤 Administrador</div>
+          <form action={signOutAction}>
+            <button type="submit" className="btn small no-print" style={{ marginTop: 6 }}>
+              Sair
+            </button>
+          </form>
           <br />
           Pra rodar as etapas do robô, use o Painel Operador — não duplicado
           aqui.

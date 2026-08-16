@@ -7,6 +7,22 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <div id="login-overlay" class="login-overlay">
+    <div class="login-card">
+      <img src="assets/logo.png" alt="Viver de Rastreamento" class="login-logo" />
+      <h1>Painel Operador</h1>
+      <p class="login-sub">Consolidação Track N'Me</p>
+      <form id="form-login" class="login-form">
+        <label for="login-email">E-mail</label>
+        <input id="login-email" type="email" required autocomplete="username" />
+        <label for="login-senha">Senha</label>
+        <input id="login-senha" type="password" required autocomplete="current-password" />
+        <p class="login-erro" id="login-erro" hidden></p>
+        <button type="submit" class="btn primary">Entrar</button>
+      </form>
+    </div>
+  </div>
+
   <div class="app-shell">
     <nav class="sidebar">
       <div class="sidebar-brand">

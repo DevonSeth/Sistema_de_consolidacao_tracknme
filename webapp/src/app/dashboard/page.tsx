@@ -15,6 +15,7 @@ import {
 import { descricaoMetrica, METRICAS, SECOES, valorMetrica } from "@/lib/dashboard-metricas-meta";
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
 
+import { signOutAction } from "../login/actions";
 import BotaoImprimir from "./BotaoImprimir";
 import CabecalhoImpressao from "./CabecalhoImpressao";
 import DistribuicaoUrgencia from "./DistribuicaoUrgencia";
@@ -126,6 +127,11 @@ export default async function DashboardPage({
           <div className="desc">Sistema de Pendências Puma — acompanhamento por período.</div>
           <UltimaAtualizacao iso={ultimaAtualizacao} />
         </div>
+        <form action={signOutAction} className="no-print" style={{ marginLeft: "auto" }}>
+          <button type="submit" className="btn small">
+            Sair
+          </button>
+        </form>
       </div>
 
       <form method="get" className="filtro-periodo">

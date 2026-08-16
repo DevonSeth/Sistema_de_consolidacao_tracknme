@@ -7,6 +7,7 @@ JavaScript (`window.pywebview.api.<metodo>` no front-end), sem precisar de
 servidor HTTP local.
 
 Métodos expostos (chamados pelo `app.js`, Passo 6):
+    autenticar(email, senha)            # gate de login, roda antes de tudo (ver _diretorio_web/index.html)
     listar_etapas_com_status()          # catálogo + status (5 estados) + contagem por origem
     obter_dashboards_operador()         # os 6 widgets nativos do "Painel de apoio"
     obter_metricas_admin_operador(desde, ate)  # métricas "emprestadas" do Admin, só as marcadas
@@ -272,6 +273,28 @@ class Api:
                 return _para_json_seguro({"aceito": False, "motivo": "nao_esta_rodando"})
             _estado.cancelar_solicitado = True
         return _para_json_seguro({"aceito": True})
+
+    def autenticar(self, email: str, senha: str) -> dict:
+        """Gate de login do Painel Operador — valida contra o Supabase Auth
+        usando um client DESCARTÁVEL, nunca `supabase_client.get_client()`
+        (singleton reaproveitado por toda leitura/escrita de negócio): o SDK
+        troca o header Authorization do client inteiro pro JWT da sessão
+        recém-logada, o que quebraria todas as chamadas de negócio
+        seguintes (elas rodariam com o token do operador, não service_role,
+        sem nenhuma policy de RLS pensada pra isso)."""
+        from supabase import create_client
+
+        cfg = manager.carregar_config()["supabase"]
+        cliente_login = create_client(cfg["url"], cfg["service_role_key"])
+        try:
+            resposta = cliente_login.auth.sign_in_with_password({"email": email, "password": senha})
+        except Exception:
+            return _para_json_seguro({"sucesso": False, "erro": "E-mail ou senha inválidos."})
+
+        papel = (resposta.user.app_metadata or {}).get("role") if resposta.user else None
+        if papel != "operador":
+            return _para_json_seguro({"sucesso": False, "erro": "E-mail ou senha inválidos."})
+        return _para_json_seguro({"sucesso": True})
 
     def abrir_tratativas(self) -> dict:
         """Abre a aba "Tratativas" da planilha Operacional no navegador

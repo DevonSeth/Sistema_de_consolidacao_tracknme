@@ -108,6 +108,81 @@ body {
 }
 .app-shell { display: flex; min-height: 100vh; }
 
+/* ---------- Login (gate antes de mostrar o app) ---------- */
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  padding: 24px;
+}
+.login-card {
+  width: 100%;
+  max-width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 32px 28px 24px;
+  text-align: center;
+}
+.login-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  object-fit: cover;
+  margin-bottom: 16px;
+}
+.login-card h1 {
+  font-size: 19px;
+  font-weight: 650;
+  margin: 0;
+  letter-spacing: -0.01em;
+  color: var(--text);
+}
+.login-sub {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin: 3px 0 24px;
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+}
+.login-form label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-top: 10px;
+}
+.login-form label:first-child {
+  margin-top: 0;
+}
+.login-form input {
+  font-family: inherit;
+  font-size: 13.5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 11px;
+  background: var(--bg);
+  color: var(--text);
+}
+.login-form .btn.primary {
+  margin-top: 18px;
+  width: 100%;
+  padding: 10px 14px;
+}
+.login-erro {
+  color: var(--status-erro-fg);
+  font-size: 12.5px;
+  margin: 6px 0 0;
+}
+
 /* ---------- Sidebar (3 itens: Fases da Automação / Dashboard / Manual) ---------- */
 .sidebar {
   width: 200px;
