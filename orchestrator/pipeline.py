@@ -61,7 +61,7 @@ completa).
 
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -537,34 +537,117 @@ def _alvos_consulta_sga(
     return alvos
 
 
-def _persistir_situacoes_sga(resultados: list, agora: datetime) -> dict:
-    """Persiste em `situacao_veiculo_sga` cada chassi com resultado bem
-    sucedido e devolve `{chassi: {status, desde, cidade, bairro,
-    encontrado_via}}` — corpo compartilhado entre o caminho normal e o de
-    reconexão parcial de `etapa_enriquecimento_sga` (mesmo trabalho,
-    chassis diferentes). `encontrado_via` ("chassi"/"placa", ver
-    `integrations.sga_bot.consultar_situacao`) é só repassado, não afeta
-    `desde`."""
-    situacoes_sga = {}
-    for r in resultados:
-        if not r.sucesso:
+def _situacoes_veiculo_sga_recentes(
+    chaves: list[str], parametros: dict, agora: datetime
+) -> dict[str, dict]:
+    """Checkpoint (achado 2026-08-17): antes de consultar o SGA ao vivo,
+    lê em 1 lote só (`buscar_situacoes_veiculo_sga_em_lote`) quem entre
+    `chaves` já foi atualizado há menos de `tempo_limiar_atualizacao_sga_
+    horas` (`system_parameters`, default 24h) — esses ficam de fora da
+    consulta ao vivo desta vez. Sem isso, TODA execução reconsultava
+    TODOS os veículos conhecidos, mesmo os checados minutos atrás — na
+    escala real (milhares de registros de Instalação-Remoção) isso
+    sozinho já bastava pra esticar a Fase D por horas.
+
+    Retorna `{chave: registro}` só de quem está recente o bastante pra
+    pular. Uma falha de rede aqui não pode derrubar a etapa nem esconder
+    veículos da consulta por engano — em caso de erro, devolve `{}`
+    (nenhum é tratado como recente, comportamento equivalente ao de antes
+    do checkpoint existir: consulta tudo)."""
+    if not chaves:
+        return {}
+    try:
+        conhecidas = supabase_client.buscar_situacoes_veiculo_sga_em_lote(chaves)
+    except Exception:  # noqa: BLE001 - checkpoint é otimização, nunca motivo de falha da etapa
+        return {}
+
+    limiar_horas = float(parametros.get("tempo_limiar_atualizacao_sga_horas", 24))
+    recentes = {}
+    for chave, registro in conhecidas.items():
+        atualizado_em_bruto = registro.get("atualizado_em")
+        if not atualizado_em_bruto:
             continue
+        momento = datetime.fromisoformat(atualizado_em_bruto)
+        if momento.tzinfo is None:
+            momento = momento.replace(tzinfo=timezone.utc)
+        if (agora - momento).total_seconds() < limiar_horas * 3600:
+            recentes[chave] = registro
+    return recentes
+
+
+def _formatar_situacoes_recentes(recentes: dict[str, dict]) -> dict[str, dict]:
+    """`situacoes_veiculo_sga` (linha crua do Supabase) -> mesmo formato de
+    `_persistir_situacoes_sga` ({status, desde, cidade, bairro,
+    encontrado_via}) — cidade/bairro nunca são persistidos (só existem no
+    retorno ao vivo de `sga_bot.consultar_situacao`), por isso ficam
+    vazios pra quem foi pulado pelo checkpoint."""
+    return {
+        chave: {
+            "status": registro.get("status"),
+            "desde": registro.get("desde"),
+            "cidade": "",
+            "bairro": "",
+            "encontrado_via": registro.get("encontrado_via"),
+        }
+        for chave, registro in recentes.items()
+    }
+
+
+def _persistir_situacoes_sga(resultados: list, agora: datetime) -> tuple[dict, list[dict]]:
+    """Persiste em `situacao_veiculo_sga` (achado 2026-08-17: 1 leitura +
+    1 gravação EM LOTE — a versão anterior fazia 3 idas ao Supabase POR
+    chassi, o maior motivo das execuções de horas na Fase D em escala
+    real) e devolve `({chassi: {status, desde, cidade, bairro,
+    encontrado_via}}, falhas_persistencia)` — corpo compartilhado entre o
+    caminho normal e o de reconexão parcial de `etapa_enriquecimento_sga`.
+
+    NUNCA levanta exceção (contrato da etapa: nenhuma falha de rede pode
+    escapar até a UI) — se a leitura ou a gravação em lote falhar, os
+    resultados da consulta ao SGA ainda são devolvidos normalmente (são
+    válidos pra uso imediato nesta mesma execução, ver `aplicar_situacoes_
+    sga`/`classificar_instalacao_remocao`), só não ficam persistidos pra
+    a próxima vez — `falhas_persistencia` sinaliza isso, nunca falha
+    silenciosa. `encontrado_via` ("chassi"/"placa", ver `integrations.
+    sga_bot.consultar_situacao`) é só repassado, não afeta `desde`."""
+    sucesso_itens = [r for r in resultados if r.sucesso]
+    if not sucesso_itens:
+        return {}, []
+
+    chassis = [r.item for r in sucesso_itens]
+    try:
+        anteriores = supabase_client.buscar_situacoes_veiculo_sga_em_lote(chassis)
+    except Exception:  # noqa: BLE001 - leitura falhou, segue sem histórico anterior
+        anteriores = {}
+
+    atualizados: dict[str, dict] = {}
+    for r in sucesso_itens:
         chassi = r.item
-        status_novo = r.resultado["status"]
-        encontrado_via = r.resultado.get("encontrado_via")
-        anterior = supabase_client.buscar_situacao_veiculo_sga(chassi)
-        atualizado = motor_regras_instalacao_remocao.atualizar_situacao_sga(
-            chassi, status_novo, anterior, agora, encontrado_via=encontrado_via
+        atualizados[chassi] = motor_regras_instalacao_remocao.atualizar_situacao_sga(
+            chassi, r.resultado["status"], anteriores.get(chassi), agora,
+            encontrado_via=r.resultado.get("encontrado_via"),
         )
-        supabase_client.upsert_situacao_veiculo_sga(atualizado)
-        situacoes_sga[chassi] = {
-            "status": atualizado["status"],
-            "desde": atualizado["desde"],
+
+    falhas_persistencia: list[dict] = []
+    try:
+        supabase_client.upsert_situacoes_veiculo_sga_em_lote(list(atualizados.values()))
+    except Exception as e:  # noqa: BLE001 - gravação falhou, resultado ao vivo não pode se perder
+        falhas_persistencia = [
+            {"item": chassi, "erro": str(e), "descricao": _descrever_chassi_sga(chassi)}
+            for chassi in atualizados
+        ]
+
+    situacoes_sga = {
+        chassi: {
+            "status": atualizados[chassi]["status"],
+            "desde": atualizados[chassi]["desde"],
             "cidade": r.resultado["cidade"],
             "bairro": r.resultado["bairro"],
-            "encontrado_via": encontrado_via,
+            "encontrado_via": atualizados[chassi]["encontrado_via"],
         }
-    return situacoes_sga
+        for r in sucesso_itens
+        for chassi in [r.item]
+    }
+    return situacoes_sga, falhas_persistencia
 
 
 async def etapa_enriquecimento_sga(
@@ -583,38 +666,42 @@ async def etapa_enriquecimento_sga(
     Instalação/Remoção. `chassis_override`/`alvos_override` (usados só na
     retomada depois de uma reconexão manual) ignoram os dois defaults
     caros e consultam só os identificadores informados — nunca rechama
-    `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho.
+    `etapa_motor_de_regras()`/`ler_aba(...)` nesse caminho (e nesse
+    caminho também não passa pelo checkpoint de novo — já passou na
+    tentativa original).
 
-    Pra cada veículo: consulta o SGA ao vivo com `_alvos_consulta_sga`
-    dizendo qual campo usar de verdade (Chassi confirmado via cadastro, ou
-    Placa quando não há chassi confirmado — achado 2026-08-16: nunca
+    Pra cada veículo candidato (`_alvos_consulta_sga` decide Chassi
+    confirmado via cadastro ou Placa válida — achado 2026-08-16: nunca
     manda o identificador de dedup cru, que pode ser um IMEI, pro campo
-    Chassi, ver `integrations.sga_bot.consultar_situacao`), lê o registro
-    anterior de `situacao_veiculo_sga` (Supabase), recalcula com
-    `core.motor_regras_instalacao_remocao.atualizar_situacao_sga` (pura —
-    decide se `desde` reinicia) e persiste de volta. Devolve um dict só,
-    `situacoes_sga` ({chassi: {status, desde, cidade, bairro,
-    encontrado_via}}) — reaproveitado tanto por `core.motor_regras.
-    aplicar_situacoes_sga` (Manutenção, usa status/cidade/bairro) quanto
-    por `core.motor_regras_instalacao_remocao.classificar_instalacao_
-    remocao` (usa status/desde pro gating de remoção). Antes desta sessão
-    (2026-08-07) essa etapa produzia dois dicts em paralelo e descartava
-    `cidade`/`bairro` do retorno de `sga_bot.consultar_situacao` — bug
-    corrigido junto com a unificação.
+    Chassi, ver `integrations.sga_bot.consultar_situacao`), primeiro passa
+    pelo CHECKPOINT (achado 2026-08-17, `_situacoes_veiculo_sga_recentes`):
+    quem já foi atualizado há menos de `tempo_limiar_atualizacao_sga_
+    horas` (default 24h) nem entra na fila de consulta ao vivo — reusa o
+    último status conhecido. Sem isso, toda execução reconsultava TODOS
+    os veículos conhecidos (na escala real, milhares), o maior motivo das
+    execuções de horas na Fase D. Devolve `situacoes_sga` ({chassi:
+    {status, desde, cidade, bairro, encontrado_via}}, com os pulados pelo
+    checkpoint misturados com os recém-consultados) — reaproveitado tanto
+    por `core.motor_regras.aplicar_situacoes_sga` (Manutenção, usa
+    status/cidade/bairro) quanto por `core.motor_regras_instalacao_
+    remocao.classificar_instalacao_remocao` (usa status/desde pro gating
+    de remoção).
 
     Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`),
     os identificadores que já tinham resultado ANTES da queda são
     persistidos mesmo assim — só os `pendentes` voltam pra tela pedir
     reconexão manual. `on_progresso`/`on_worker_status` (opcionais)
     repassam pro `processar_fila` subjacente. `dados["falhas"]` lista os
-    identificadores que não tiveram sucesso na consulta (antes
-    descartados silenciosamente por `_persistir_situacoes_sga`, que só
-    grava quem teve sucesso). `dados["alvos_consulta_sga"]` é sempre
-    incluído (mesmo nos 2 desfechos de interrupção) só pra
+    identificadores que não tiveram sucesso na consulta OU cujo resultado
+    não conseguiu ser gravado no Supabase (achado 2026-08-17,
+    `_persistir_situacoes_sga` nunca perde isso em silêncio nem levanta
+    exceção — ver docstring de lá). `dados["alvos_consulta_sga"]` é
+    sempre incluído (mesmo nos 2 desfechos de interrupção) só pra
     `orchestrator.catalogo_etapas.retomar_etapa` repassar como
     `alvos_override` na retomada, sem precisar recalcular
     `dados_classificacao` do zero.
     """
+    situacoes_puladas: dict[str, dict] = {}
     if chassis_override is not None:
         chassis = chassis_override
         alvos = alvos_override or {}
@@ -629,7 +716,12 @@ async def etapa_enriquecimento_sga(
                 google_sheets_client.NOME_PLANILHA_ADMINISTRADOR, "Instalação-Remoção"
             )
         parametros = supabase_client.buscar_parametros()
-        alvos = _alvos_consulta_sga(dados_classificacao, instalacao_remocao, parametros)
+        todos_alvos = _alvos_consulta_sga(dados_classificacao, instalacao_remocao, parametros)
+        recentes = _situacoes_veiculo_sga_recentes(
+            list(todos_alvos.keys()), parametros, datetime.now(timezone.utc)
+        )
+        situacoes_puladas = _formatar_situacoes_recentes(recentes)
+        alvos = {chave: alvo for chave, alvo in todos_alvos.items() if chave not in recentes}
         chassis = sorted(alvos.keys())
 
     on_item_iniciado = None
@@ -654,27 +746,27 @@ async def etapa_enriquecimento_sga(
                 await browser.close()
     except playwright_utils.AguardandoReconexao as e:
         agora = datetime.now()
-        situacoes_sga = _persistir_situacoes_sga(e.processados, agora)
+        situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(e.processados, agora)
         return ResultadoEtapa(
             "enriquecimento_sga",
             sucesso=False,
             mensagem=f"Sessão caída — aguardando reconexão manual ({len(e.pendentes)} pendente(s)).",
             dados={
-                "situacoes_sga": situacoes_sga,
-                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+                "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
+                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga) + falhas_persistencia,
                 "alvos_consulta_sga": alvos,
             },
             aguardando_reconexao={"pendentes": e.pendentes},
         )
     except playwright_utils.CancelamentoSolicitado as e:
-        situacoes_sga = _persistir_situacoes_sga(e.processados, datetime.now())
+        situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(e.processados, datetime.now())
         return ResultadoEtapa(
             "enriquecimento_sga",
             sucesso=False,
             mensagem=f"Cancelado pelo usuário ({len(e.pendentes)} pendente(s)).",
             dados={
-                "situacoes_sga": situacoes_sga,
-                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga),
+                "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
+                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga) + falhas_persistencia,
                 "alvos_consulta_sga": alvos,
             },
             cancelado={"pendentes": e.pendentes},
@@ -682,13 +774,13 @@ async def etapa_enriquecimento_sga(
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
         return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
 
-    situacoes_sga = _persistir_situacoes_sga(resultados, datetime.now())
+    situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(resultados, datetime.now())
     return ResultadoEtapa(
         "enriquecimento_sga",
         sucesso=True,
         dados={
-            "situacoes_sga": situacoes_sga,
-            "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga),
+            "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
+            "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga) + falhas_persistencia,
             "alvos_consulta_sga": alvos,
         },
     )

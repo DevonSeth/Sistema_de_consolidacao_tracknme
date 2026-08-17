@@ -55,6 +55,11 @@ class _QueryFalsa:
         self.cliente.chamadas.append(("update", self.tabela, payload, list(self.filtros)))
         return self
 
+    def upsert(self, payload, on_conflict=None):
+        self._payload = payload
+        self.cliente.chamadas.append(("upsert", self.tabela, payload, on_conflict))
+        return self
+
     def execute(self):
         if self._payload is None:
             self.cliente.chamadas.append(("select", self.tabela, list(self.filtros)))
@@ -96,6 +101,10 @@ def _chamadas_insert(cliente, tabela):
 
 def _chamadas_update(cliente, tabela):
     return [c[2] for c in cliente.chamadas if c[0] == "update" and c[1] == tabela]
+
+
+def _chamadas_upsert(cliente, tabela):
+    return [c[2] for c in cliente.chamadas if c[0] == "upsert" and c[1] == tabela]
 
 
 # --------------------------------------------------------------------------
@@ -481,3 +490,80 @@ def test_buscar_ultimas_execucoes_agrupa_por_etapa_e_respeita_limite(monkeypatch
         "2026-08-14T10:00:00+00:00", "2026-08-13T10:00:00+00:00",
     ]
     assert len(resultado["enriquecimento_sga"]) == 1
+
+
+# --------------------------------------------------------------------------
+# buscar_situacoes_veiculo_sga_em_lote / upsert_situacoes_veiculo_sga_em_lote
+# (achado 2026-08-17: substituem as versões 1-a-1 -- 1 leitura/gravação em
+# lote em vez de N idas ao Supabase, o maior motivo das execuções de horas
+# na Fase D em escala real)
+# --------------------------------------------------------------------------
+
+def test_buscar_situacoes_veiculo_sga_em_lote_indexa_por_chassi(monkeypatch):
+    linhas = [
+        {"chassi": "CHASSI-001", "status": "ATIVO"},
+        {"chassi": "CHASSI-002", "status": "INATIVO"},
+    ]
+    cliente = _ClienteFalso(retornos={"situacao_veiculo_sga": [linhas]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_situacoes_veiculo_sga_em_lote(["CHASSI-001", "CHASSI-002", "CHASSI-003"])
+
+    assert resultado == {"CHASSI-001": linhas[0], "CHASSI-002": linhas[1]}
+    chamadas_select = [c for c in cliente.chamadas if c[0] == "select"]
+    assert chamadas_select[0][2] == [("in", "chassi", ["CHASSI-001", "CHASSI-002", "CHASSI-003"])]
+
+
+def test_buscar_situacoes_veiculo_sga_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    assert sc.buscar_situacoes_veiculo_sga_em_lote([]) == {}
+    assert cliente.chamadas == []
+
+
+def test_upsert_situacoes_veiculo_sga_em_lote_faz_1_chamada_so(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_situacoes_veiculo_sga_em_lote([
+        {"chassi": "CHASSI-001", "status": "ATIVO", "desde": None, "atualizado_em": None, "encontrado_via": "chassi"},
+        {"chassi": "CHASSI-002", "status": "INATIVO", "desde": None, "atualizado_em": None, "encontrado_via": "placa"},
+    ])
+
+    upserts = _chamadas_upsert(cliente, "situacao_veiculo_sga")
+    assert len(upserts) == 1
+    assert [r["chassi"] for r in upserts[0]] == ["CHASSI-001", "CHASSI-002"]
+
+
+def test_upsert_situacoes_veiculo_sga_em_lote_converte_datetime_pra_iso(monkeypatch):
+    from datetime import datetime
+
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+    momento = datetime(2026, 8, 17, 9, 0, 0)
+
+    sc.upsert_situacoes_veiculo_sga_em_lote([
+        {"chassi": "CHASSI-001", "status": "ATIVO", "desde": momento, "atualizado_em": momento},
+    ])
+
+    upserts = _chamadas_upsert(cliente, "situacao_veiculo_sga")
+    assert upserts[0][0]["desde"] == momento.isoformat()
+    assert upserts[0][0]["atualizado_em"] == momento.isoformat()
+
+
+def test_upsert_situacoes_veiculo_sga_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_situacoes_veiculo_sga_em_lote([])
+
+    assert cliente.chamadas == []
+
+
+def test_upsert_situacoes_veiculo_sga_em_lote_exige_chassi_em_cada_registro(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    with pytest.raises(ValueError):
+        sc.upsert_situacoes_veiculo_sga_em_lote([{"status": "ATIVO"}])

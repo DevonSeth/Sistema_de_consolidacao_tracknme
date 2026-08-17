@@ -835,8 +835,8 @@ def _preparar_mocks_sga(monkeypatch):
 
     monkeypatch.setattr(orch, "async_playwright", lambda: _PlaywrightCtxFalso())
     monkeypatch.setattr(orch.sga_bot, "aguardar_login_manual", _aguardar_login_manual_fake)
-    monkeypatch.setattr(orch.supabase_client, "buscar_situacao_veiculo_sga", lambda chassi: None)
-    monkeypatch.setattr(orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: None)
+    monkeypatch.setattr(orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote", lambda chassis: {})
+    monkeypatch.setattr(orch.supabase_client, "upsert_situacoes_veiculo_sga_em_lote", lambda registros: None)
     monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
     monkeypatch.setattr(
         orch.motor_regras_instalacao_remocao, "atualizar_situacao_sga", _atualizar_situacao_sga_fake
@@ -992,7 +992,8 @@ async def test_etapa_enriquecimento_sga_sessao_caida_persiste_sucessos_antes_da_
     _preparar_mocks_sga(monkeypatch)
     persistidos = []
     monkeypatch.setattr(
-        orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: persistidos.append(dados["chassi"])
+        orch.supabase_client, "upsert_situacoes_veiculo_sga_em_lote",
+        lambda registros: persistidos.extend(r["chassi"] for r in registros),
     )
 
     async def _processar_fila_levanta_reconexao(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
@@ -1022,7 +1023,8 @@ async def test_etapa_enriquecimento_sga_cancelado_persiste_sucessos_antes_do_can
     _preparar_mocks_sga(monkeypatch)
     persistidos = []
     monkeypatch.setattr(
-        orch.supabase_client, "upsert_situacao_veiculo_sga", lambda dados: persistidos.append(dados["chassi"])
+        orch.supabase_client, "upsert_situacoes_veiculo_sga_em_lote",
+        lambda registros: persistidos.extend(r["chassi"] for r in registros),
     )
 
     async def _processar_fila_levanta_cancelamento(contexto_arg, chassis, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
@@ -1184,6 +1186,112 @@ async def test_etapa_enriquecimento_sga_inclui_alvos_consulta_sga_no_resultado(m
         "X1": (orch.TIPO_IDENTIFICADOR_CHASSI, "X1"),
         "X2": (orch.TIPO_IDENTIFICADOR_CHASSI, "X2"),
     }
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_checkpoint_pula_quem_foi_atualizado_recentemente(monkeypatch):
+    # Achado 2026-08-17: sem esse checkpoint, toda execução reconsultava
+    # TODOS os veículos conhecidos, mesmo os checados minutos atrás -- na
+    # escala real (milhares de registros), isso sozinho esticava a Fase D
+    # por horas.
+    _preparar_mocks_sga(monkeypatch)
+    agora = datetime.now(orch.timezone.utc)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote",
+        lambda chassis: {
+            "X1": {"chassi": "X1", "status": "ATIVO", "desde": "2026-08-01T00:00:00+00:00",
+                    "atualizado_em": agora.isoformat(), "encontrado_via": "chassi"},
+        },
+    )
+    chamadas = []
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        chamadas.append(valor)
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    # X1 foi atualizado agora mesmo -- pulado; X2 nunca foi checado -- consultado.
+    assert chamadas == ["X2"]
+    assert resultado.dados["alvos_consulta_sga"] == {"X2": (orch.TIPO_IDENTIFICADOR_CHASSI, "X2")}
+    # X1 continua aparecendo em situacoes_sga (reusa o último status conhecido).
+    assert resultado.dados["situacoes_sga"]["X1"]["status"] == "ATIVO"
+    assert resultado.dados["situacoes_sga"]["X1"]["encontrado_via"] == "chassi"
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_checkpoint_nao_pula_quem_esta_desatualizado(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote",
+        lambda chassis: {
+            "X1": {"chassi": "X1", "status": "ATIVO", "desde": "2020-01-01T00:00:00+00:00",
+                    "atualizado_em": "2020-01-01T00:00:00+00:00", "encontrado_via": "chassi"},
+        },
+    )
+    chamadas = []
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        chamadas.append(valor)
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    assert sorted(chamadas) == ["X1", "X2"]
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_checkpoint_com_erro_de_leitura_nao_pula_ninguem(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+
+    def _buscar_falha(chassis):
+        raise RuntimeError("Supabase indisponível")
+
+    monkeypatch.setattr(orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote", _buscar_falha)
+    chamadas = []
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        chamadas.append(valor)
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    assert sorted(chamadas) == ["X1", "X2"]
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_falha_ao_gravar_nao_perde_resultado_nem_derruba_etapa(monkeypatch):
+    # Achado 2026-08-17: antes, uma falha de rede na gravação (fora do
+    # try/except da etapa) escapava como exceção não tratada -- deixava a
+    # trava de execução presa pra sempre (nunca era liberada).
+    _preparar_mocks_sga(monkeypatch)
+
+    def _upsert_falha(registros):
+        raise RuntimeError("Timeout na gravação")
+
+    monkeypatch.setattr(orch.supabase_client, "upsert_situacoes_veiculo_sga_em_lote", _upsert_falha)
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    assert resultado.dados["situacoes_sga"]["X1"]["status"] == "ATIVO"
+    assert resultado.dados["situacoes_sga"]["X2"]["status"] == "ATIVO"
+    falhas_persistencia = [f for f in resultado.dados["falhas"] if "Timeout na gravação" in f["erro"]]
+    assert len(falhas_persistencia) == 2
 
 
 # --- etapa_consolidar_com_sga -----------------------------------------------

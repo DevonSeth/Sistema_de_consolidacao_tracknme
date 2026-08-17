@@ -97,7 +97,7 @@ de eficiência do SGA/Track N'Me.
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 from config import manager
 from core.constants import (
@@ -181,9 +181,17 @@ def get_client() -> Client:
     """Cliente Supabase, criado uma única vez (singleton). Se a config for
     resalva com credenciais novas em runtime, chamar `get_client.cache_clear()`
     antes da próxima chamada.
+
+    `postgrest_client_timeout` explícito (achado 2026-08-17): o default da
+    biblioteca já é 120s, mas deixamos explícito e mais curto — uma
+    chamada que nunca recebe resposta não pode travar a etapa (e,
+    principalmente, a trava de execução) por tempo indefinido. Só afeta
+    chamadas de rede de verdade; nada muda pra quem já responde rápido.
     """
     cfg = manager.carregar_config()["supabase"]
-    return create_client(cfg["url"], cfg["service_role_key"])
+    return create_client(
+        cfg["url"], cfg["service_role_key"], options=ClientOptions(postgrest_client_timeout=30)
+    )
 
 
 def buscar_elegiveis_para_disparo() -> list[dict]:
@@ -636,43 +644,51 @@ def buscar_pontos_acao_ativos() -> list[dict]:
     )
 
 
-def buscar_situacao_veiculo_sga(chassi: str) -> dict | None:
-    """Último status do SGA conhecido pra esse chassi. Ver
+def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
+    """Último status do SGA conhecido pra cada um de `chassis`, numa leitura
+    só (`.in_(...)`) — achado 2026-08-17: a versão anterior lia 1 chassi
+    por vez; na escala real (milhares de veículos), isso sozinho já
+    significava milhares de idas sequenciais ao Supabase, contribuindo
+    pras execuções de horas na Fase D. Devolve `{chassi: registro}` — só
+    entram chassis que já tinham situação conhecida. Ver
     `core.motor_regras_instalacao_remocao.atualizar_situacao_sga` pra a
     lógica pura que decide se `desde` reinicia ou não.
     """
+    if not chassis:
+        return {}
     client = get_client()
     linhas = (
         client.table("situacao_veiculo_sga")
         .select("*")
-        .eq("chassi", chassi)
+        .in_("chassi", chassis)
         .execute()
         .data
     )
-    return linhas[0] if linhas else None
+    return {linha["chassi"]: linha for linha in linhas}
 
 
-def upsert_situacao_veiculo_sga(dados: dict) -> None:
-    """Insere ou atualiza `situacao_veiculo_sga` pra um chassi — chave
-    primária é `chassi`, não `chave_unica` como em `upsert_tratativa`.
-    Espera o dict retornado por `core.motor_regras_instalacao_remocao.
-    atualizar_situacao_sga`; `desde`/`atualizado_em` podem vir como
-    `datetime` (o core não conhece formato de Supabase, converte-se
-    aqui pra ISO).
-    """
-    if "chassi" not in dados:
-        raise ValueError("dados precisa conter 'chassi' para upsert_situacao_veiculo_sga")
-
-    payload = dict(dados)
-    for campo in ("desde", "atualizado_em"):
-        if isinstance(payload.get(campo), datetime):
-            payload[campo] = payload[campo].isoformat()
-
-    client = get_client()
-    if buscar_situacao_veiculo_sga(payload["chassi"]):
-        client.table("situacao_veiculo_sga").update(payload).eq("chassi", payload["chassi"]).execute()
-    else:
-        client.table("situacao_veiculo_sga").insert(payload).execute()
+def upsert_situacoes_veiculo_sga_em_lote(registros: list[dict]) -> None:
+    """Insere/atualiza `situacao_veiculo_sga` pra todos os `registros` numa
+    gravação só (upsert em lote pela chave primária `chassi`) — mesmo
+    motivo de `buscar_situacoes_veiculo_sga_em_lote`: a versão anterior
+    fazia 1 leitura + 1 gravação POR chassi (3 idas ao Supabase por
+    veículo, contando a leitura própria de `upsert_situacao_veiculo_sga`
+    de decidir insert vs. update). Espera uma lista de dicts no formato de
+    `core.motor_regras_instalacao_remocao.atualizar_situacao_sga`;
+    `desde`/`atualizado_em` podem vir como `datetime` (o core não conhece
+    formato de Supabase, converte-se aqui pra ISO)."""
+    if not registros:
+        return
+    payloads = []
+    for dados in registros:
+        if "chassi" not in dados:
+            raise ValueError("dados precisa conter 'chassi' para upsert_situacoes_veiculo_sga_em_lote")
+        payload = dict(dados)
+        for campo in ("desde", "atualizado_em"):
+            if isinstance(payload.get(campo), datetime):
+                payload[campo] = payload[campo].isoformat()
+        payloads.append(payload)
+    get_client().table("situacao_veiculo_sga").upsert(payloads, on_conflict="chassi").execute()
 
 
 def registrar_log_execucao(
