@@ -650,6 +650,41 @@ def _persistir_situacoes_sga(resultados: list, agora: datetime) -> tuple[dict, l
     return situacoes_sga, falhas_persistencia
 
 
+def _avaliar_circuit_breaker_sga_http(resultados_canario: list, parametros: dict) -> dict | None:
+    """Acha se o Estágio HTTP (achado 2026-08-19) deve ser abortado pro
+    resto da execução, baseado na taxa de "não encontrado"/falha técnica
+    num lote canário pequeno processado antes do resto — cobre o risco
+    real de o SGA mudar a ofuscação do `key`/layout do HTML sem aviso
+    (não é API documentada). Baseline real medido em escala completa
+    (5953 veículos): ~2.35% de "não encontrado" (veículo órfão/pseudo-
+    chassi, já diagnosticado à parte), ~0% de falha técnica —
+    `sga_http_limiar_nao_encontrado`/`_limiar_falha_tecnica` (system_
+    parameters, ver `_handoff/sql_sga_http_parametros.sql`) dão margem
+    generosa acima disso antes de considerar anômalo. Devolve `None` se
+    dentro do limiar (segue com HTTP normalmente) ou um dict com o motivo
+    do abort."""
+    total = len(resultados_canario)
+    if total == 0:
+        return None
+    nao_encontrado = sum(
+        1 for r in resultados_canario
+        if r.sucesso and r.resultado.get("status") == sga_bot.STATUS_NAO_ENCONTRADO
+    )
+    falha_tecnica = sum(1 for r in resultados_canario if not r.sucesso)
+    taxa_nao_encontrado = nao_encontrado / total
+    taxa_falha_tecnica = falha_tecnica / total
+    limiar_nao_encontrado = float(parametros.get("sga_http_limiar_nao_encontrado", 0.15))
+    limiar_falha_tecnica = float(parametros.get("sga_http_limiar_falha_tecnica", 0.05))
+
+    if taxa_falha_tecnica > limiar_falha_tecnica:
+        motivo = "taxa_falha_tecnica"
+    elif taxa_nao_encontrado > limiar_nao_encontrado:
+        motivo = "taxa_nao_encontrado"
+    else:
+        return None
+    return {"motivo": motivo, "taxa_nao_encontrado": taxa_nao_encontrado, "taxa_falha_tecnica": taxa_falha_tecnica}
+
+
 async def etapa_enriquecimento_sga(
     dados_classificacao: dict | None = None,
     instalacao_remocao: list[dict] | None = None,
@@ -659,7 +694,7 @@ async def etapa_enriquecimento_sga(
     cancelar_checker: Callable[[], bool] | None = None,
     on_worker_status: Callable[[int, str], None] | None = None,
 ) -> ResultadoEtapa:
-    """Única etapa manual (login no SGA exige captcha) — cobre Manutenção,
+    """Único login manual real (SGA exige captcha) — cobre Manutenção,
     Instalação e Remoção numa consulta só, decisão do usuário: `dados_
     classificacao` (default: `etapa_motor_de_regras()`) dá os veículos de
     Manutenção; `instalacao_remocao` (default: `ler_aba(...)`) dá os de
@@ -673,38 +708,45 @@ async def etapa_enriquecimento_sga(
     Pra cada veículo candidato (`_alvos_consulta_sga` decide Chassi
     confirmado via cadastro ou Placa válida — achado 2026-08-16: nunca
     manda o identificador de dedup cru, que pode ser um IMEI, pro campo
-    Chassi, ver `integrations.sga_bot.consultar_situacao`), primeiro passa
-    pelo CHECKPOINT (achado 2026-08-17, `_situacoes_veiculo_sga_recentes`):
-    quem já foi atualizado há menos de `tempo_limiar_atualizacao_sga_
-    horas` (default 24h) nem entra na fila de consulta ao vivo — reusa o
-    último status conhecido. Sem isso, toda execução reconsultava TODOS
-    os veículos conhecidos (na escala real, milhares), o maior motivo das
-    execuções de horas na Fase D. Devolve `situacoes_sga` ({chassi:
-    {status, desde, cidade, bairro, encontrado_via}}, com os pulados pelo
-    checkpoint misturados com os recém-consultados) — reaproveitado tanto
-    por `core.motor_regras.aplicar_situacoes_sga` (Manutenção, usa
-    status/cidade/bairro) quanto por `core.motor_regras_instalacao_
-    remocao.classificar_instalacao_remocao` (usa status/desde pro gating
-    de remoção).
+    Chassi), primeiro passa pelo CHECKPOINT (achado 2026-08-17,
+    `_situacoes_veiculo_sga_recentes`): quem já foi atualizado há menos de
+    `tempo_limiar_atualizacao_sga_horas` (default 24h) nem entra na fila
+    de consulta ao vivo — reusa o último status conhecido.
 
-    Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`),
-    os identificadores que já tinham resultado ANTES da queda são
-    persistidos mesmo assim — só os `pendentes` voltam pra tela pedir
-    reconexão manual. `on_progresso`/`on_worker_status` (opcionais)
-    repassam pro `processar_fila` subjacente. `dados["falhas"]` lista os
-    identificadores que não tiveram sucesso na consulta OU cujo resultado
-    não conseguiu ser gravado no Supabase (achado 2026-08-17,
-    `_persistir_situacoes_sga` nunca perde isso em silêncio nem levanta
-    exceção — ver docstring de lá). `dados["alvos_consulta_sga"]` é
-    sempre incluído (mesmo nos 2 desfechos de interrupção) só pra
+    **2 ESTÁGIOS sequenciais, achado 2026-08-19** (dentro da mesma sessão,
+    1 login manual só): Estágio HTTP — só chassi confirmado, via
+    `sga_bot.consultar_situacao_http` (~37.5x mais rápido que o navegador,
+    ver memória `sga_api_http_viabilidade_confirmada`), controlado por
+    `system_parameters.sga_http_habilitado` (kill switch, default
+    desligado) — processa um lote canário primeiro e usa
+    `_avaliar_circuit_breaker_sga_http` pra decidir se continua ou aborta
+    o resto pro Playwright (SGA pode mudar sem aviso, não é API
+    documentada). Estágio Playwright — busca por Placa (nunca validada
+    via HTTP) e qualquer sobra do circuit breaker/kill switch desligado —
+    reabre o navegador a partir da MESMA sessão salva no Estágio HTTP
+    (`sga_bot.abrir_contexto_com_sessao`, sem captcha de novo) quando o
+    Estágio HTTP rodou; senão faz o login manual normal. Cada estágio só
+    roda se tiver algo pra fazer — com o kill switch desligado (default),
+    o fluxo é 100% Estágio Playwright, idêntico ao existente antes desta
+    mudança.
+
+    Se a sessão do SGA cair no meio da consulta (`AguardandoReconexao`,
+    em QUALQUER estágio), os identificadores que já tinham resultado ANTES
+    da queda são persistidos mesmo assim — só os `pendentes` (inclusive o
+    que nunca chegou a ser tentado no estágio seguinte) voltam pra tela
+    pedir reconexão manual. `dados["falhas"]` lista os identificadores que
+    não tiveram sucesso na consulta OU cujo resultado não conseguiu ser
+    gravado no Supabase (`_persistir_situacoes_sga` nunca perde isso em
+    silêncio nem levanta exceção). `dados["alvos_consulta_sga"]` é sempre
+    incluído (mesmo nos desfechos de interrupção) só pra
     `orchestrator.catalogo_etapas.retomar_etapa` repassar como
-    `alvos_override` na retomada, sem precisar recalcular
-    `dados_classificacao` do zero.
+    `alvos_override` na retomada — que re-divide os pendentes entre os 2
+    estágios do zero, sem precisar saber de qual estágio cada um veio.
     """
     situacoes_puladas: dict[str, dict] = {}
     if chassis_override is not None:
-        chassis = chassis_override
         alvos = alvos_override or {}
+        parametros = supabase_client.buscar_parametros()
     else:
         if dados_classificacao is None:
             resultado_motor = etapa_motor_de_regras()
@@ -722,68 +764,136 @@ async def etapa_enriquecimento_sga(
         )
         situacoes_puladas = _formatar_situacoes_recentes(recentes)
         alvos = {chave: alvo for chave, alvo in todos_alvos.items() if chave not in recentes}
-        chassis = sorted(alvos.keys())
 
     on_item_iniciado = None
     if on_worker_status is not None:
         on_item_iniciado = lambda worker_id, chassi: on_worker_status(worker_id, _descrever_chassi_sga(chassi))  # noqa: E731
 
-    async def _consultar(page, chave):
-        tipo, valor = alvos[chave]
+    if bool(parametros.get("sga_http_habilitado", False)):
+        alvos_chassi = {c: v for c, v in alvos.items() if v[0] == TIPO_IDENTIFICADOR_CHASSI}
+        alvos_playwright_pendentes = {c: v for c, v in alvos.items() if v[0] != TIPO_IDENTIFICADOR_CHASSI}
+    else:
+        alvos_chassi = {}
+        alvos_playwright_pendentes = dict(alvos)
+
+    async def _consultar_http(request_context, chave):
+        tipo, valor = alvos_chassi[chave]
+        return await sga_bot.consultar_situacao_http(request_context, tipo, valor)
+
+    async def _consultar_playwright(page, chave):
+        tipo, valor = alvos_playwright_pendentes[chave]
         return await sga_bot.consultar_situacao(page, tipo, valor)
 
-    try:
-        async with async_playwright() as playwright:
-            browser, context = await sga_bot.aguardar_login_manual(playwright)
-            try:
-                resultados = await playwright_utils.processar_fila(
-                    context, chassis, _consultar,
-                    on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                    on_item_iniciado=on_item_iniciado,
-                )
-            finally:
-                await context.close()
-                await browser.close()
-    except playwright_utils.AguardandoReconexao as e:
-        agora = datetime.now()
-        situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(e.processados, agora)
-        return ResultadoEtapa(
-            "enriquecimento_sga",
-            sucesso=False,
-            mensagem=f"Sessão caída — aguardando reconexão manual ({len(e.pendentes)} pendente(s)).",
-            dados={
-                "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
-                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga) + falhas_persistencia,
-                "alvos_consulta_sga": alvos,
-            },
-            aguardando_reconexao={"pendentes": e.pendentes},
-        )
-    except playwright_utils.CancelamentoSolicitado as e:
-        situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(e.processados, datetime.now())
-        return ResultadoEtapa(
-            "enriquecimento_sga",
-            sucesso=False,
-            mensagem=f"Cancelado pelo usuário ({len(e.pendentes)} pendente(s)).",
-            dados={
-                "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
-                "falhas": _falhas_com_descricao(e.processados, _descrever_chassi_sga) + falhas_persistencia,
-                "alvos_consulta_sga": alvos,
-            },
-            cancelado={"pendentes": e.pendentes},
-        )
-    except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
+    resultados_totais: list = []
+    sga_http_abortado: dict | None = None
+    estado_sessao_sga: dict | None = None
 
-    situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(resultados, datetime.now())
-    return ResultadoEtapa(
-        "enriquecimento_sga",
-        sucesso=True,
-        dados={
+    def _resultado_final(
+        sucesso: bool, mensagem: str = "",
+        aguardando_reconexao: dict | None = None, cancelado: dict | None = None,
+    ) -> ResultadoEtapa:
+        situacoes_sga, falhas_persistencia = _persistir_situacoes_sga(resultados_totais, datetime.now())
+        dados = {
             "situacoes_sga": {**situacoes_puladas, **situacoes_sga},
-            "falhas": _falhas_com_descricao(resultados, _descrever_chassi_sga) + falhas_persistencia,
+            "falhas": _falhas_com_descricao(resultados_totais, _descrever_chassi_sga) + falhas_persistencia,
             "alvos_consulta_sga": alvos,
-        },
-    )
+        }
+        if sga_http_abortado is not None:
+            dados["sga_http_abortado"] = sga_http_abortado
+        return ResultadoEtapa(
+            "enriquecimento_sga", sucesso=sucesso, mensagem=mensagem, dados=dados,
+            aguardando_reconexao=aguardando_reconexao, cancelado=cancelado,
+        )
+
+    if alvos_chassi:
+        chassis_chassi = sorted(alvos_chassi.keys())
+        tamanho_canario = min(int(parametros.get("sga_http_tamanho_canario", 200)), len(chassis_chassi))
+        canario, resto = chassis_chassi[:tamanho_canario], chassis_chassi[tamanho_canario:]
+        concorrencia = int(parametros.get("sga_http_concorrencia", 80))
+        fase_http_atual = "canario"
+
+        try:
+            async with async_playwright() as playwright:
+                browser, context = await sga_bot.aguardar_login_manual(playwright)
+                request_context, estado_sessao_sga = await sga_bot.preparar_contexto_http(playwright, browser, context)
+                try:
+                    resultados_canario = await playwright_utils.processar_fila_http(
+                        request_context, canario, _consultar_http, concorrencia=concorrencia,
+                        on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                        on_item_iniciado=on_item_iniciado,
+                    )
+                    resultados_totais.extend(resultados_canario)
+
+                    sga_http_abortado = _avaliar_circuit_breaker_sga_http(resultados_canario, parametros)
+                    if sga_http_abortado is not None:
+                        alvos_playwright_pendentes.update({c: alvos_chassi[c] for c in resto})
+                    elif resto:
+                        fase_http_atual = "resto"
+                        resultados_resto = await playwright_utils.processar_fila_http(
+                            request_context, resto, _consultar_http, concorrencia=concorrencia,
+                            on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                            on_item_iniciado=on_item_iniciado,
+                        )
+                        resultados_totais.extend(resultados_resto)
+                finally:
+                    await request_context.dispose()
+        except playwright_utils.AguardandoReconexao as e:
+            resultados_totais.extend(e.processados)
+            pendentes = (
+                list(e.pendentes) + (resto if fase_http_atual == "canario" else [])
+                + list(alvos_playwright_pendentes.keys())
+            )
+            return _resultado_final(
+                False, f"Sessão caída — aguardando reconexão manual ({len(pendentes)} pendente(s)).",
+                aguardando_reconexao={"pendentes": pendentes},
+            )
+        except playwright_utils.CancelamentoSolicitado as e:
+            resultados_totais.extend(e.processados)
+            pendentes = (
+                list(e.pendentes) + (resto if fase_http_atual == "canario" else [])
+                + list(alvos_playwright_pendentes.keys())
+            )
+            return _resultado_final(
+                False, f"Cancelado pelo usuário ({len(pendentes)} pendente(s)).",
+                cancelado={"pendentes": pendentes},
+            )
+        except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
+            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
+
+    if alvos_playwright_pendentes:
+        chassis_playwright = sorted(alvos_playwright_pendentes.keys())
+        try:
+            async with async_playwright() as playwright:
+                if estado_sessao_sga is not None:
+                    browser, context = await sga_bot.abrir_contexto_com_sessao(playwright, estado_sessao_sga)
+                else:
+                    browser, context = await sga_bot.aguardar_login_manual(playwright)
+                try:
+                    resultados_playwright = await playwright_utils.processar_fila(
+                        context, chassis_playwright, _consultar_playwright,
+                        on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                        on_item_iniciado=on_item_iniciado,
+                    )
+                    resultados_totais.extend(resultados_playwright)
+                finally:
+                    await context.close()
+                    await browser.close()
+        except playwright_utils.AguardandoReconexao as e:
+            resultados_totais.extend(e.processados)
+            return _resultado_final(
+                False, f"Sessão caída — aguardando reconexão manual ({len(e.pendentes)} pendente(s)).",
+                aguardando_reconexao={"pendentes": list(e.pendentes)},
+            )
+        except playwright_utils.CancelamentoSolicitado as e:
+            resultados_totais.extend(e.processados)
+            return _resultado_final(
+                False, f"Cancelado pelo usuário ({len(e.pendentes)} pendente(s)).",
+                cancelado={"pendentes": list(e.pendentes)},
+            )
+        except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
+            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
+
+    return _resultado_final(True)
 
 
 async def etapa_consolidar_com_sga(

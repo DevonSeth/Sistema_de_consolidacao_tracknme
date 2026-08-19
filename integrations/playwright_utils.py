@@ -233,3 +233,140 @@ async def processar_fila(
     for r in resultados_r1:
         final.append(r if r.sucesso else resultados_r2_por_item.get(id(r.item), r))
     return final
+
+
+# ---------------------------------------------------------------------------
+# processar_fila_http -- equivalente de processar_fila pra trabalho HTTP puro
+# (achado 2026-08-19, integrations.sga_bot.consultar_situacao_http). Função
+# dedicada em vez de generalizar processar_fila/_rodar_round: os dois usam
+# "recursos por worker" incompatíveis (Page real vs. nenhum recurso, só um
+# APIRequestContext compartilhado) -- misturar isso na mesma função obrigaria
+# a mexer numa peça crítica também usada por integrations/tracknme_bot.py.
+# Reusa _executar_com_tentativas (já é agnóstico ao que "page" significa,
+# só repassa pra `acao`) e espelha o mesmo contrato de retorno/exceções de
+# processar_fila -- ResultadoItem, 2 rounds de retry, SessaoCaidaError ->
+# AguardandoReconexao, cancelar_checker -> CancelamentoSolicitado.
+# ---------------------------------------------------------------------------
+
+
+async def _rodar_round_http(
+    request_context: Any,
+    itens: list,
+    acao: Callable[[Any, Any], Awaitable[Any]],
+    concorrencia: int,
+    max_tentativas: int,
+    on_item_concluido: Callable[[], None] | None = None,
+    cancelar_checker: Callable[[], bool] | None = None,
+    on_item_iniciado: Callable[[int, Any], None] | None = None,
+) -> tuple[list[ResultadoItem], SessaoCaidaError | None, list, bool]:
+    fila: asyncio.Queue = asyncio.Queue()
+    for item in itens:
+        fila.put_nowait(item)
+
+    resultados: list[ResultadoItem] = []
+    sessao_caida: SessaoCaidaError | None = None
+    cancelado = False
+
+    async def worker(worker_id: int) -> None:
+        nonlocal sessao_caida, cancelado
+        while sessao_caida is None and not cancelado:
+            if cancelar_checker is not None and cancelar_checker():
+                cancelado = True
+                break
+            try:
+                item = fila.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if on_item_iniciado is not None:
+                on_item_iniciado(worker_id, item)
+            try:
+                resultado = await _executar_com_tentativas(request_context, item, acao, max_tentativas)
+                resultados.append(resultado)
+                if on_item_concluido is not None:
+                    on_item_concluido()
+            except SessaoCaidaError as e:
+                sessao_caida = e
+                fila.put_nowait(item)  # devolve o item que estava em andamento
+                break
+
+    workers = [
+        asyncio.create_task(worker(worker_id))
+        for worker_id in range(min(concorrencia, max(len(itens), 1)))
+    ]
+    await asyncio.gather(*workers)
+
+    pendentes: list = []
+    while not fila.empty():
+        pendentes.append(fila.get_nowait())
+
+    return resultados, sessao_caida, pendentes, cancelado
+
+
+async def processar_fila_http(
+    request_context: Any,
+    itens: list,
+    acao: Callable[[Any, Any], Awaitable[Any]],
+    concorrencia: int = 80,
+    max_tentativas: int = 3,
+    on_progresso: Callable[[int, int], None] | None = None,
+    cancelar_checker: Callable[[], bool] | None = None,
+    on_item_iniciado: Callable[[int, Any], None] | None = None,
+) -> list[ResultadoItem]:
+    """Processa `itens` via HTTP puro, sem `Page`/`BrowserContext.
+    new_page()` nenhuma -- `concorrencia` tarefas `asyncio` competem por
+    uma fila compartilhada sobre `request_context` (`playwright.request`
+    `APIRequestContext`, já autenticado — ver `integrations.sga_bot.
+    preparar_contexto_http`, que fecha o navegador ANTES de qualquer
+    consulta). `concorrencia` pode ser bem mais alta que `num_workers` de
+    `processar_fila` (validado até 100 simultâneas sem erro técnico numa
+    rodada de escala real de 5953 itens, throughput estável) — não há
+    recurso pesado por trabalhador, só uma tarefa presa à fila.
+
+    Mesmo contrato de `processar_fila`: `acao(request_context, item)`
+    deve levantar `SessaoCaidaError` ao detectar sessão inválida (ex:
+    resposta redirecionada pra login) — pausa a fila inteira e vira
+    `AguardandoReconexao`, nunca gasta tentativas à toa. 2 rounds de retry
+    (round 1 fila inteira, round 2 só quem falhou), `on_progresso`/
+    `on_item_iniciado`/`cancelar_checker` com o mesmo significado de
+    `processar_fila` (ver docstring de lá — não repetido aqui)."""
+    if not itens:
+        return []
+
+    total = len(itens)
+    concluidos = 0
+
+    def _reportar_progresso() -> None:
+        nonlocal concluidos
+        concluidos += 1
+        if on_progresso is not None:
+            on_progresso(min(concluidos, total), total)
+
+    on_item_concluido = _reportar_progresso if on_progresso is not None else None
+
+    resultados_r1, sessao_caida, pendentes, cancelado = await _rodar_round_http(
+        request_context, itens, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
+        on_item_iniciado,
+    )
+    if sessao_caida is not None:
+        raise AguardandoReconexao(pendentes=pendentes, processados=resultados_r1)
+    if cancelado:
+        raise CancelamentoSolicitado(pendentes=pendentes, processados=resultados_r1)
+
+    falharam = [r.item for r in resultados_r1 if not r.sucesso]
+    if not falharam:
+        return resultados_r1
+
+    resultados_r2, sessao_caida2, pendentes2, cancelado2 = await _rodar_round_http(
+        request_context, falharam, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
+        on_item_iniciado,
+    )
+    if sessao_caida2 is not None:
+        raise AguardandoReconexao(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)
+    if cancelado2:
+        raise CancelamentoSolicitado(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)
+
+    resultados_r2_por_item = {id(r.item): r for r in resultados_r2}
+    final: list[ResultadoItem] = []
+    for r in resultados_r1:
+        final.append(r if r.sucesso else resultados_r2_por_item.get(id(r.item), r))
+    return final

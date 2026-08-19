@@ -26,8 +26,12 @@ por chassi -- essa continua em
 """
 
 import asyncio
+import base64
+import random
+import re
 
 from playwright.async_api import (
+    APIRequestContext,
     Browser,
     BrowserContext,
     Page,
@@ -35,7 +39,7 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
-from core.constants import STATUS_SGA_NAO_ENCONTRADO, TIPO_IDENTIFICADOR_CHASSI
+from core.constants import STATUS_SGA_ATIVO, STATUS_SGA_NAO_ENCONTRADO, TIPO_IDENTIFICADOR_CHASSI
 from integrations.playwright_utils import SessaoCaidaError
 
 URL_LOGIN = "https://sga.hinova.com.br/sga/sgav4_pumabeneficios/v5/login.php"
@@ -217,3 +221,187 @@ async def _extrair_campo_correspondencia(page: Page, seletor: str) -> str:
         if tentativa < 2:
             await asyncio.sleep(0.5)
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Consulta via HTTP puro (achado 2026-08-19) -- substitui a navegação DOM por
+# 2 requisições HTTP diretas, reaproveitando a sessão pós-login via
+# `storage_state` (sem navegador nenhum aberto durante a consulta). Convive
+# com `consultar_situacao` (Playwright) acima -- nunca a substitui: só cobre
+# busca por CHASSI (o endpoint de busca por Placa nunca foi descoberto/
+# validado), e o caminho Playwright continua sendo o fallback real pra Placa
+# e pra qualquer degradação detectada (ver `orchestrator.pipeline`).
+#
+# Mecanismo (validado em 7 rodadas ao vivo contra produção, ver memória
+# `sga_api_http_viabilidade_confirmada`): `carregaChassiFiltro.php` devolve
+# o id interno do veículo; `key` é esse id "criptografado" por uma função
+# JS pública e trivial de reverter (`cript.js`, `fCriptografa`); `carrega
+# VeiculoDadosAlteracao.php?key=...` devolve HTML com os dados via
+# atribuição JS inline (`form.CAMPO.value = '...';`), não um <select>/
+# <input> prontos -- por isso a extração é por regex, não por parsing de
+# formulário.
+# ---------------------------------------------------------------------------
+
+TAMANHO_MINIMO_HTML_VALIDO = 10_000
+
+MAPA_STATUS_SGA_CODIGO = {
+    "1": STATUS_SGA_ATIVO,
+    "19": "CANCELADO POR SUBSTITUIÇÃO",
+    "20": "INADIMPLENTE VIDEO",
+    # Vistos em produção sem label confirmado ainda (código existe, texto
+    # não foi cruzado contra o navegador) -- 2, 11, 12, 15, 18. Adicionar
+    # aqui assim que confirmado; até lá, `_label_status` degrada com
+    # segurança (nunca é confundido com ATIVO/NÃO ENCONTRADO, ver docstring).
+}
+
+
+def _gerar_key(id_veiculo: int) -> str:
+    """Reimplementação em Python de `fCriptografa(id, "INT")` do `cript.js`
+    público do SGA -- ofuscação trivial (não é segurança de verdade),
+    reversível por qualquer um que leia o JS. `rand` é gerado de novo a
+    cada chamada (igual o JS faz), então o mesmo `id_veiculo` nunca produz
+    o mesmo `key` duas vezes -- irrelevante pra decodificação do lado do
+    SGA, que só olha os dígitos embutidos."""
+    rand = random.randint(100, 999)
+    multiplicado = id_veiculo * rand
+    resto = multiplicado % 7
+    concatenado = f"{multiplicado}{rand}{resto}"
+    return base64.b64encode(concatenado.encode()).decode()
+
+
+def _extrair_id_veiculo(xml_bytes: bytes) -> int | None:
+    """`carregaChassiFiltro.php` devolve XML declarado `iso-8859-1`
+    (decodificação nunca falha -- só dígitos/tags importam aqui). `None`
+    se o veículo não existe no SGA (`<results></results>` vazio) --
+    resultado de negócio válido, não erro técnico."""
+    xml_texto = xml_bytes.decode("iso-8859-1", errors="replace")
+    m = re.search(r'<rs id="(\d+)"', xml_texto)
+    return int(m.group(1)) if m else None
+
+
+def _extrair_campos_html(html: str) -> dict:
+    """`carregaVeiculoDadosAlteracao.php` preenche o formulário via JS
+    inline (`form.CAMPO.value = '...';`), não HTML pronto -- extrai os 3
+    campos que hoje vêm de `consultar_situacao` (Playwright). Campo
+    ausente vira string vazia, nunca levanta exceção (mesmo contrato de
+    tolerância de `_extrair_campo_correspondencia`)."""
+    resultado = {"status_codigo": "", "cidade": "", "bairro": ""}
+    mapa_campos = {
+        "cmbSituacaoVeiculo": "status_codigo",
+        "dfsCidadeCorrespondencia": "cidade",
+        "dfsBairroCorrespondencia": "bairro",
+    }
+    for campo_js, chave in mapa_campos.items():
+        m = re.search(rf"form\.{campo_js}\.value = '([^']*)'", html)
+        if m:
+            resultado[chave] = m.group(1)
+    return resultado
+
+
+def _label_status(codigo: str) -> str:
+    """Traduz o código numérico do status pro texto que o resto do sistema
+    já espera (`core.motor_regras.aplicar_situacoes_sga` só compara contra
+    `STATUS_SGA_ATIVO`/`STATUS_SGA_NAO_ENCONTRADO` -- qualquer outro texto
+    já cai corretamente em "REGRA_SGA_INATIVO"). Código sem label
+    confirmado ainda NUNCA é confundido com ATIVO/NÃO ENCONTRADO -- só
+    fica menos legível na mensagem até alguém completar `MAPA_STATUS_SGA_
+    CODIGO`, mas a decisão de negócio permanece correta."""
+    if codigo in MAPA_STATUS_SGA_CODIGO:
+        return MAPA_STATUS_SGA_CODIGO[codigo]
+    return f"DESCONHECIDO (código {codigo})"
+
+
+async def preparar_contexto_http(
+    playwright: Playwright, browser: Browser, context: BrowserContext
+) -> tuple[APIRequestContext, dict]:
+    """Chamado logo após `aguardar_login_manual` -- salva a sessão
+    autenticada e fecha o navegador por completo -- toda consulta seguinte
+    usa só HTTP (`playwright.request`, sem navegador nenhum aberto).
+    Devolve `(request_context, estado)` -- `estado` é reaproveitado por
+    quem chama pra reabrir um `BrowserContext` autenticado depois, sem
+    pedir captcha de novo na mesma execução (ver `orchestrator.pipeline.
+    etapa_enriquecimento_sga`, Estágio Playwright de fallback pra busca
+    por Placa, e `abrir_contexto_com_sessao` abaixo). Quem chama é
+    responsável por `.dispose()` no `APIRequestContext` devolvido, no fim
+    do uso."""
+    estado = await context.storage_state()
+    await context.close()
+    await browser.close()
+    request_context = await playwright.request.new_context(storage_state=estado)
+    return request_context, estado
+
+
+async def abrir_contexto_com_sessao(playwright: Playwright, estado: dict) -> tuple[Browser, BrowserContext]:
+    """Reabre um `BrowserContext` autenticado a partir de uma sessão já
+    validada (`estado`, devolvido por `preparar_contexto_http`) -- usado
+    quando o Estágio HTTP já fez o login manual (captcha) e ainda restam
+    veículos que só dá pra consultar via Playwright (busca por Placa) —
+    evita pedir captcha 2x na mesma execução. Headless: a sessão já está
+    autenticada, não precisa de tela visível."""
+    browser = await playwright.chromium.launch(headless=True)
+    context = await browser.new_context(storage_state=estado)
+    return browser, context
+
+
+def _verificar_resposta_http(resposta, valor: str, nome_endpoint: str) -> None:
+    """`resposta.url` reflete a URL final (pós-redirecionamento) -- se o
+    SGA redirecionar pra login, a sessão caiu de verdade (não é falha
+    pontual do item), aciona o mesmo fluxo de reconexão manual que o
+    caminho Playwright já usa."""
+    if "login.php" in resposta.url:
+        raise SessaoCaidaError(f"Sessão do SGA caiu (requisição HTTP redirecionada para login.php, chassi={valor})")
+    if resposta.status != 200:
+        raise RuntimeError(f"{nome_endpoint} devolveu status {resposta.status} (chassi={valor})")
+
+
+async def consultar_situacao_http(request_context: APIRequestContext, tipo: str, valor: str) -> dict:
+    """Equivalente HTTP de `consultar_situacao`, só pra busca por CHASSI —
+    o endpoint de busca por Placa nunca foi descoberto/validado (achado
+    2026-08-19); `orchestrator.pipeline` mantém o caminho Playwright pra
+    esses casos (~2-3% do volume real). Levanta `ValueError` se chamado
+    com Placa, pra nunca mascarar um uso incorreto.
+
+    Mesmo contrato de retorno de `consultar_situacao`
+    (`{status, cidade, bairro, encontrado_via}`). `id` não resolvido no
+    XML é resultado de NEGÓCIO válido (veículo/pseudo-chassi não existe no
+    SGA) — devolve `STATUS_NAO_ENCONTRADO` sem 2ª requisição. HTML final
+    pequeno demais ou sem o campo de status (mesmo com um `id` real
+    resolvido) é falha TÉCNICA (`RuntimeError`, cai no retry padrão de
+    `processar_fila_http`) — nunca confundida com "não encontrado".
+    """
+    if tipo != TIPO_IDENTIFICADOR_CHASSI:
+        raise ValueError(f"consultar_situacao_http só busca por chassi, recebeu tipo={tipo!r}")
+
+    base_url = URL_CONSULTAR_VEICULO.rsplit("/", 2)[0]
+
+    resposta_filtro = await request_context.get(
+        f"{base_url}/carrega/carregaChassiFiltro.php", params={"input": valor}
+    )
+    _verificar_resposta_http(resposta_filtro, valor, "carregaChassiFiltro.php")
+
+    id_veiculo = _extrair_id_veiculo(await resposta_filtro.body())
+    if id_veiculo is None:
+        return {"status": STATUS_NAO_ENCONTRADO, "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    key = _gerar_key(id_veiculo)
+    resposta_dados = await request_context.get(
+        f"{base_url}/carrega/carregaVeiculoDadosAlteracao.php", params={"key": key}
+    )
+    _verificar_resposta_http(resposta_dados, valor, "carregaVeiculoDadosAlteracao.php")
+
+    corpo_bytes = await resposta_dados.body()
+    if len(corpo_bytes) < TAMANHO_MINIMO_HTML_VALIDO:
+        raise RuntimeError(
+            f"Resposta pequena demais ({len(corpo_bytes)} bytes) -- possível página de erro (chassi={valor})"
+        )
+
+    campos = _extrair_campos_html(corpo_bytes.decode("utf-8", errors="replace"))
+    if not campos["status_codigo"]:
+        raise RuntimeError(f"HTML não trouxe o status do veículo -- formato inesperado (chassi={valor})")
+
+    return {
+        "status": _label_status(campos["status_codigo"]),
+        "cidade": campos["cidade"],
+        "bairro": campos["bairro"],
+        "encontrado_via": tipo,
+    }

@@ -7,6 +7,7 @@ from integrations.playwright_utils import (
     CancelamentoSolicitado,
     SessaoCaidaError,
     processar_fila,
+    processar_fila_http,
 )
 
 
@@ -284,3 +285,153 @@ async def test_varios_workers_processam_tudo_sem_perder_item():
     assert len(resultados) == 20
     assert sorted(r.resultado for r in resultados) == itens
     assert contador_paginas_abertas <= 4
+
+
+# ---------------------------------------------------------------------------
+# processar_fila_http -- achado 2026-08-19, mesmo contrato de processar_fila
+# mas sem Page/BrowserContext.new_page() nenhuma (só uma fila de tarefas
+# asyncio sobre um "request_context" qualquer -- aqui um sentinela `object()`,
+# já que a função nunca abre recurso nenhum por trabalhador).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_http_todos_sucesso_de_primeira():
+    async def acao(request_context, item):
+        return item * 2
+
+    resultados = await processar_fila_http(object(), [1, 2, 3], acao, concorrencia=2)
+
+    assert len(resultados) == 3
+    assert all(r.sucesso for r in resultados)
+    assert all(r.tentativas == 1 for r in resultados)
+    assert sorted(r.resultado for r in resultados) == [2, 4, 6]
+
+
+@pytest.mark.asyncio
+async def test_http_item_falha_duas_vezes_e_sucede_na_terceira():
+    contadores = {}
+
+    async def acao(request_context, item):
+        contadores[item] = contadores.get(item, 0) + 1
+        if contadores[item] < 3:
+            raise RuntimeError("falha simulada")
+        return "ok"
+
+    resultados = await processar_fila_http(object(), ["x"], acao, concorrencia=1)
+
+    assert len(resultados) == 1
+    assert resultados[0].sucesso is True
+    assert resultados[0].tentativas == 3
+
+
+@pytest.mark.asyncio
+async def test_http_item_falha_round1_mas_sucede_no_round2():
+    tentativas_totais = {}
+
+    async def acao(request_context, item):
+        tentativas_totais[item] = tentativas_totais.get(item, 0) + 1
+        if tentativas_totais[item] < 4:
+            raise RuntimeError("falha")
+        return "recuperado"
+
+    resultados = await processar_fila_http(object(), ["a", "b"], acao, concorrencia=2, max_tentativas=3)
+
+    assert len(resultados) == 2
+    for r in resultados:
+        assert r.sucesso is True
+        assert r.resultado == "recuperado"
+
+
+@pytest.mark.asyncio
+async def test_http_item_falha_nas_duas_rodadas_fica_marcado_como_falho():
+    async def acao(request_context, item):
+        raise RuntimeError("sempre falha")
+
+    resultados = await processar_fila_http(object(), ["z"], acao, concorrencia=1, max_tentativas=2)
+
+    assert len(resultados) == 1
+    assert resultados[0].sucesso is False
+    assert "sempre falha" in resultados[0].erro
+
+
+@pytest.mark.asyncio
+async def test_http_sessao_caida_pausa_fila_e_preserva_pendentes():
+    async def acao(request_context, item):
+        if item == 3:
+            raise SessaoCaidaError("sessão expirou")
+        return "ok"
+
+    with pytest.raises(AguardandoReconexao) as exc_info:
+        await processar_fila_http(object(), [1, 2, 3, 4, 5], acao, concorrencia=1)
+
+    erro = exc_info.value
+    assert 3 in erro.pendentes
+    assert set(erro.pendentes) <= {3, 4, 5}
+    assert len(erro.processados) + len(erro.pendentes) == 5
+
+
+@pytest.mark.asyncio
+async def test_http_cancelar_checker_interrompe_processamento_da_fila():
+    processados = []
+
+    async def acao(request_context, item):
+        processados.append(item)
+        return "ok"
+
+    def cancelar_checker():
+        return len(processados) >= 2
+
+    with pytest.raises(CancelamentoSolicitado) as exc_info:
+        await processar_fila_http(
+            object(), [1, 2, 3, 4, 5], acao, concorrencia=1, cancelar_checker=cancelar_checker
+        )
+
+    erro = exc_info.value
+    assert len(erro.processados) == 2
+    assert set(erro.pendentes) == {3, 4, 5}
+
+
+@pytest.mark.asyncio
+async def test_http_fila_vazia_nao_faz_nada():
+    async def acao(request_context, item):
+        raise AssertionError("não deveria ser chamada")
+
+    resultados = await processar_fila_http(object(), [], acao)
+    assert resultados == []
+
+
+@pytest.mark.asyncio
+async def test_http_on_progresso_reporta_contagem_crescente_ate_o_total():
+    chamadas = []
+
+    async def acao(request_context, item):
+        return item
+
+    resultados = await processar_fila_http(
+        object(), ["a", "b", "c"], acao, concorrencia=1,
+        on_progresso=lambda concluidos, total: chamadas.append((concluidos, total)),
+    )
+
+    assert len(resultados) == 3
+    assert chamadas == [(1, 3), (2, 3), (3, 3)]
+
+
+@pytest.mark.asyncio
+async def test_http_concorrencia_real_nunca_excede_o_limite_configurado():
+    simultaneas = 0
+    pico_simultaneas = 0
+
+    async def acao(request_context, item):
+        nonlocal simultaneas, pico_simultaneas
+        simultaneas += 1
+        pico_simultaneas = max(pico_simultaneas, simultaneas)
+        await asyncio.sleep(0.01)
+        simultaneas -= 1
+        return item
+
+    itens = list(range(30))
+    resultados = await processar_fila_http(object(), itens, acao, concorrencia=5)
+
+    assert len(resultados) == 30
+    assert pico_simultaneas <= 5

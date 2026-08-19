@@ -1294,6 +1294,175 @@ async def test_etapa_enriquecimento_sga_falha_ao_gravar_nao_perde_resultado_nem_
     assert len(falhas_persistencia) == 2
 
 
+# --- etapa_enriquecimento_sga: Estágio HTTP (achado 2026-08-19) -------------
+
+
+class _RequestContextHttpFake:
+    """`request_context` mínimo pros testes do Estágio HTTP -- só precisa
+    saber fechar (`.dispose()`), a consulta em si é sempre mockada em
+    `orch.sga_bot.consultar_situacao_http`, nunca chama nada real."""
+
+    async def dispose(self):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_http_habilitado_mistura_chassi_e_placa(monkeypatch):
+    # Com sga_http_habilitado, chassi confirmado vai pro Estágio HTTP e
+    # placa continua pelo Estágio Playwright, na MESMA execução -- sem
+    # pedir captcha 2x (abrir_contexto_com_sessao reusa a sessão do
+    # Estágio HTTP em vez de aguardar_login_manual de novo).
+    contexto, browser = _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {"sga_http_habilitado": True})
+
+    class _RequestContextFake:
+        def __init__(self):
+            self.dispose_chamado = False
+
+        async def dispose(self):
+            self.dispose_chamado = True
+
+    request_context_fake = _RequestContextFake()
+    estado_fake = {"cookies": ["fake"]}
+
+    async def _preparar_contexto_http_fake(playwright, browser_arg, context_arg):
+        return request_context_fake, estado_fake
+
+    monkeypatch.setattr(orch.sga_bot, "preparar_contexto_http", _preparar_contexto_http_fake)
+
+    chamadas_abrir_contexto_com_sessao = []
+
+    async def _abrir_contexto_com_sessao_fake(playwright, estado):
+        chamadas_abrir_contexto_com_sessao.append(estado)
+        return browser, contexto
+
+    monkeypatch.setattr(orch.sga_bot, "abrir_contexto_com_sessao", _abrir_contexto_com_sessao_fake)
+
+    chamadas_http, chamadas_playwright = [], []
+
+    async def _consultar_situacao_http_fake(request_context, tipo, valor):
+        chamadas_http.append(valor)
+        return {"status": "ATIVO", "cidade": "Recife", "bairro": "Boa Vista", "encontrado_via": tipo}
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        chamadas_playwright.append(valor)
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao_http", _consultar_situacao_http_fake)
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    # X2 (grupo_2, chassi_sga confirmado) vai pro HTTP; GHI9012 (grupo_1
+    # sem chassi_sga, só placa válida) vai pro Playwright.
+    grupo_1 = [{"placa": "GHI9012", "chassi": "862667082144174", "imei": "862667082144174", "cliente": "Fulano"}]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1}
+
+    resultado = await orch.etapa_enriquecimento_sga(dados, [])
+
+    assert resultado.sucesso is True
+    assert chamadas_http == ["X2"]
+    assert chamadas_playwright == ["862667082144174"] or chamadas_playwright == ["GHI9012"]
+    assert chamadas_abrir_contexto_com_sessao == [estado_fake]
+    assert request_context_fake.dispose_chamado is True
+    assert resultado.dados["situacoes_sga"]["X2"]["status"] == "ATIVO"
+    assert resultado.dados["situacoes_sga"]["862667082144174"]["status"] == "ATIVO"
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_kill_switch_desligado_nunca_usa_http(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)  # buscar_parametros -> {} (sga_http_habilitado ausente = desligado)
+
+    async def _consultar_situacao_http_nao_deveria_ser_chamada(request_context, tipo, valor):
+        raise AssertionError("não deveria chamar consultar_situacao_http com o kill switch desligado")
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao_http", _consultar_situacao_http_nao_deveria_ser_chamada)
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    assert "sga_http_abortado" not in resultado.dados
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_circuit_breaker_aborta_resto_pro_playwright(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"sga_http_habilitado": True, "sga_http_tamanho_canario": 1, "sga_http_limiar_nao_encontrado": 0.1},
+    )
+
+    async def _preparar_contexto_http_fake(playwright, browser_arg, context_arg):
+        return _RequestContextHttpFake(), {"cookies": ["fake"]}
+
+    monkeypatch.setattr(orch.sga_bot, "preparar_contexto_http", _preparar_contexto_http_fake)
+
+    async def _abrir_contexto_com_sessao_fake(playwright, estado):
+        return _BrowserFalsoReconciliacao(), _ContextoFalsoReconciliacao()
+
+    monkeypatch.setattr(orch.sga_bot, "abrir_contexto_com_sessao", _abrir_contexto_com_sessao_fake)
+
+    chamadas_http, chamadas_playwright = [], []
+
+    async def _consultar_situacao_http_fake(request_context, tipo, valor):
+        chamadas_http.append(valor)
+        return {"status": orch.sga_bot.STATUS_NAO_ENCONTRADO, "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    async def _consultar_situacao_fake(page, tipo, valor):
+        chamadas_playwright.append(valor)
+        return {"status": "ATIVO", "cidade": "", "bairro": "", "encontrado_via": tipo}
+
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao_http", _consultar_situacao_http_fake)
+    monkeypatch.setattr(orch.sga_bot, "consultar_situacao", _consultar_situacao_fake)
+
+    # X1 e X2 (ambos chassi confirmado): tamanho_canario=1 -> só X1 entra
+    # no canário, 100% "não encontrado" ultrapassa o limiar de 10% ->
+    # circuit breaker aborta, X2 (o "resto") é redirecionado pro Playwright.
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, [])
+
+    assert resultado.sucesso is True
+    assert resultado.dados["sga_http_abortado"]["motivo"] == "taxa_nao_encontrado"
+    assert chamadas_http == ["X1"]
+    assert chamadas_playwright == ["X2"]
+    assert resultado.dados["situacoes_sga"]["X1"]["status"] == orch.sga_bot.STATUS_NAO_ENCONTRADO
+    assert resultado.dados["situacoes_sga"]["X2"]["status"] == "ATIVO"
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_reconexao_no_estagio_http_inclui_placa_pendente(monkeypatch):
+    # Achado 2026-08-19 (Decisão 3 do plano): se o Estágio HTTP cair, os
+    # alvos de Placa (Estágio Playwright) que NUNCA chegaram a rodar
+    # também precisam voltar em "pendentes" -- senão a retomada os perde.
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {"sga_http_habilitado": True})
+
+    async def _preparar_contexto_http_fake(playwright, browser_arg, context_arg):
+        return _RequestContextHttpFake(), {"cookies": ["fake"]}
+
+    monkeypatch.setattr(orch.sga_bot, "preparar_contexto_http", _preparar_contexto_http_fake)
+
+    async def _processar_fila_http_levanta_reconexao(
+        request_context, chassis, acao, concorrencia=80, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None,
+    ):
+        raise orch.playwright_utils.AguardandoReconexao(pendentes=list(chassis), processados=[])
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_levanta_reconexao)
+
+    # X2 (grupo_2, chassi confirmado) vai pro Estágio HTTP (que cai);
+    # 862667082144174 (grupo_1, só placa válida) fica no Estágio
+    # Playwright, que nunca chega a rodar.
+    grupo_1 = [{"placa": "GHI9012", "chassi": "862667082144174", "imei": "862667082144174", "cliente": "Fulano"}]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1}
+
+    resultado = await orch.etapa_enriquecimento_sga(dados, [])
+
+    assert resultado.sucesso is False
+    assert set(resultado.aguardando_reconexao["pendentes"]) == {"X2", "862667082144174"}
+
+
 # --- etapa_consolidar_com_sga -----------------------------------------------
 
 _DADOS_SGA_FAKE = {
