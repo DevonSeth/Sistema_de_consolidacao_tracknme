@@ -35,6 +35,7 @@ let etapasCache = [];
 let selecionadas = new Set();
 let estaRodando = false;
 let motivoParadaAnterior = undefined;
+let rodandoAnterior = false;
 
 function api() {
   return window.pywebview.api;
@@ -257,9 +258,16 @@ async function pollProgresso() {
   // barra de progresso — carregarEtapas() reconstrói #lista-fases do zero
   // (innerHTML = ""), então chamada depois de mostrarProgressoNoCard ela
   // apagava a barra no mesmo tick, antes do navegador repintar.
-  if (progresso.rodando || motivoParadaAnterior !== progresso.motivo_parada) {
+  //
+  // Achado 2026-08-19: uma conclusão COM SUCESSO nunca muda `motivo_parada`
+  // (fica `null` antes E depois -- só falha/cancelamento/reconexão setam
+  // um valor) -- por isso também precisa comparar `rodando` contra o tick
+  // anterior, senão a transição "rodando -> concluído com sucesso" nunca
+  // dispara o refresh e a tela fica travada mostrando "Rodando" pra sempre.
+  if (progresso.rodando || rodandoAnterior || motivoParadaAnterior !== progresso.motivo_parada) {
     await carregarEtapas();
   }
+  rodandoAnterior = progresso.rodando;
   motivoParadaAnterior = progresso.motivo_parada;
 
   if (progresso.progresso_item) {
