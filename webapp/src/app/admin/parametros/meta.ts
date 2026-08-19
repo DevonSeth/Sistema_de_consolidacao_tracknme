@@ -1,4 +1,4 @@
-export type Categoria = "geral" | "risco" | "prazos" | "disparo" | "observabilidade";
+export type Categoria = "geral" | "risco" | "prazos" | "disparo" | "observabilidade" | "desempenho";
 export type TipoCampo = "bool" | "numero" | "texto" | "tier";
 
 export type MetaParametro = {
@@ -15,6 +15,7 @@ export const CATEGORIAS: { chave: Categoria; label: string }[] = [
   { chave: "prazos", label: "Prazos" },
   { chave: "disparo", label: "Esteira de disparo" },
   { chave: "observabilidade", label: "Observabilidade" },
+  { chave: "desempenho", label: "Desempenho" },
 ];
 
 export const META: Record<string, MetaParametro> = {
@@ -115,6 +116,40 @@ export const META: Record<string, MetaParametro> = {
     categoria: "observabilidade",
     tipo: "numero",
     sufixo: "x a média histórica",
+  },
+  sga_http_habilitado: {
+    label: "Consultar SGA via HTTP (sem navegador)",
+    categoria: "desempenho",
+    tipo: "bool",
+  },
+  sga_http_concorrencia: {
+    label: "Concorrência HTTP no SGA (workers)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "consultas simultâneas",
+    aviso:
+      "Testado sem erro até 160 (nenhum teto encontrado ainda) — throughput não melhorou de 100 pra 160 na única medição real. Ajuste aos poucos e observe o resultado de cada rodada.",
+  },
+  sga_http_tamanho_canario: {
+    label: "Tamanho do lote canário (HTTP)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "veículos",
+  },
+  sga_http_limiar_nao_encontrado: {
+    label: "Limiar de 'não encontrado' do circuit breaker",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "proporção 0-1",
+    aviso:
+      "Baseline real medido: ~2.35% dos veículos. Acima disso, a etapa aborta o caminho HTTP pro resto da execução (cai pro navegador).",
+  },
+  sga_http_limiar_falha_tecnica: {
+    label: "Limiar de falha técnica do circuit breaker",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "proporção 0-1",
+    aviso: "Baseline real medido: ~0%.",
   },
 };
 

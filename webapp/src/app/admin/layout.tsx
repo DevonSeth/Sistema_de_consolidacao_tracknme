@@ -43,6 +43,9 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         <Link className="nav-item" href="/admin/dashboards">
           <span className="ic">▤</span> Dashboards
         </Link>
+        <Link className="nav-item" href="/admin/logs">
+          <span className="ic">🕐</span> Log de Execuções
+        </Link>
         <Link className="nav-item" href="/admin/manual">
           <span className="ic">📖</span> Manual do Sistema
         </Link>

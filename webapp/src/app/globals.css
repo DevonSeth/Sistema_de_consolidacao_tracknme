@@ -626,6 +626,14 @@ td.acoes {
   background: var(--status-ocioso-bg);
   color: var(--status-ocioso-fg);
 }
+.pill-erro {
+  background: var(--status-erro-bg);
+  color: var(--status-erro-fg);
+}
+.pill-atencao {
+  background: var(--status-ocioso-bg);
+  color: var(--nivel-3);
+}
 .pill-nivel {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -911,7 +919,8 @@ td.acoes {
   font-size: 11.5px;
   color: var(--text-muted);
 }
-.filtro-periodo input[type="date"] {
+.filtro-periodo input[type="date"],
+.filtro-periodo select {
   font-family: inherit;
   font-size: 13px;
   border: 1px solid var(--border);
