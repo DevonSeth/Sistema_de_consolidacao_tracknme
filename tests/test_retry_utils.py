@@ -1,3 +1,4 @@
+import httpx
 import pytest
 
 from integrations.retry_utils import retry_erro_transitorio_windows
@@ -68,6 +69,38 @@ def test_default_e_5_tentativas_com_espera_escalonada(monkeypatch):
 
     assert len(chamadas) == 5
     assert esperas == [0.5, 1.0, 2.0, 4.0]  # 4 esperas entre as 5 tentativas, dobrando
+
+
+def test_httpx_transport_error_retenta_e_sucede(monkeypatch):
+    """Achado 2 (mesmo dia): ConnectionTerminated (HTTP/2, conexão
+    persistente do Supabase derrubada pelo servidor) chega como
+    httpx.TransportError -- não é OSError, precisa do próprio except."""
+    monkeypatch.setattr("integrations.retry_utils.time.sleep", lambda segundos: None)
+    chamadas = []
+
+    @retry_erro_transitorio_windows()
+    def funcao():
+        chamadas.append(1)
+        if len(chamadas) < 2:
+            raise httpx.RemoteProtocolError("ConnectionTerminated error_code:1, last_stream_id:5255")
+        return "recuperado"
+
+    assert funcao() == "recuperado"
+    assert len(chamadas) == 2
+
+
+def test_httpx_transport_error_esgota_tentativas_e_propaga(monkeypatch):
+    monkeypatch.setattr("integrations.retry_utils.time.sleep", lambda segundos: None)
+    chamadas = []
+
+    @retry_erro_transitorio_windows(tentativas=3)
+    def funcao():
+        chamadas.append(1)
+        raise httpx.ConnectError("conexão recusada")
+
+    with pytest.raises(httpx.TransportError):
+        funcao()
+    assert len(chamadas) == 3
 
 
 def test_outro_winerror_nao_retenta():
