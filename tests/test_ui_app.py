@@ -555,3 +555,75 @@ def test_main_registra_ao_fechar_na_janela(monkeypatch):
     _args, kwargs = chamadas["create_window"]
     assert kwargs["js_api"].__class__ is app.Api
     assert janelas_criadas[0].events.closing.handlers == [app._ao_fechar]
+
+
+# --------------------------------------------------------------------------
+# Api.autenticar()
+# --------------------------------------------------------------------------
+
+class _UsuarioFalso:
+    def __init__(self, papel):
+        self.app_metadata = {"role": papel} if papel else {}
+
+
+class _RespostaAuthFalsa:
+    def __init__(self, papel):
+        self.user = _UsuarioFalso(papel) if papel is not None else None
+
+
+class _ClienteAuthFalso:
+    def __init__(self, papel=None, excecao=None):
+        self._papel = papel
+        self._excecao = excecao
+        self.auth = self
+
+    def sign_in_with_password(self, credenciais):
+        if self._excecao is not None:
+            raise self._excecao
+        return _RespostaAuthFalsa(self._papel)
+
+
+def _monkeypatch_config(monkeypatch):
+    monkeypatch.setattr(
+        app.manager, "carregar_config",
+        lambda: {"supabase": {"url": "https://fake.supabase.co", "service_role_key": "fake"}},
+    )
+
+
+class TestAutenticar:
+    def test_sucesso_com_papel_operador(self, monkeypatch):
+        _monkeypatch_config(monkeypatch)
+        monkeypatch.setattr("supabase.create_client", lambda *a, **k: _ClienteAuthFalso(papel="operador"))
+
+        assert app.Api().autenticar("a@b.com", "senha") == {"sucesso": True}
+
+    def test_papel_diferente_de_operador_e_credencial_invalida(self, monkeypatch):
+        _monkeypatch_config(monkeypatch)
+        monkeypatch.setattr("supabase.create_client", lambda *a, **k: _ClienteAuthFalso(papel="admin"))
+
+        resultado = app.Api().autenticar("a@b.com", "senha")
+
+        assert resultado == {"sucesso": False, "erro": "E-mail ou senha inválidos."}
+
+    def test_credencial_invalida_no_sign_in_devolve_erro_estruturado(self, monkeypatch):
+        _monkeypatch_config(monkeypatch)
+        monkeypatch.setattr(
+            "supabase.create_client",
+            lambda *a, **k: _ClienteAuthFalso(excecao=RuntimeError("Invalid login credentials")),
+        )
+
+        resultado = app.Api().autenticar("a@b.com", "senha")
+
+        assert resultado["sucesso"] is False
+        assert "Invalid login credentials" in resultado["erro"]
+
+    def test_falha_tecnica_antes_do_sign_in_nunca_escapa_sem_resposta_estruturada(self, monkeypatch):
+        """Achado 2026-08-19 -- `carregar_config`/`create_client` ficavam
+        fora do `try`, travando a tela de login sem erro nenhum visível se
+        qualquer um dos dois falhasse."""
+        monkeypatch.setattr(app.manager, "carregar_config", lambda: (_ for _ in ()).throw(RuntimeError("config quebrada")))
+
+        resultado = app.Api().autenticar("a@b.com", "senha")
+
+        assert resultado["sucesso"] is False
+        assert "config quebrada" in resultado["erro"]

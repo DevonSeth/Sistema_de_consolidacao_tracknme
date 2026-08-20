@@ -59,22 +59,29 @@ async function carregarEtapas() {
  * Fase B roda no início com "Motor de regras" e de novo, mais tarde, com
  * "Consolidar com SGA"; Fase C roda "Abrir" antes do SGA e "Fechar"
  * depois). Reagrupar por rótulo (ignorando a posição) sugeriria uma
- * ordem de execução errada — a esteira é sequencial, os rótulos não. */
+ * ordem de execução errada — a esteira é sequencial, os rótulos não.
+ * A partir da 2ª vez que uma fase reaparece, o título ganha um sufixo
+ * "(retomada, Nª vez nesta esteira)" — sem isso, a repetição parecia
+ * erro/duplicata pra quem está aprendendo o sistema (achado 2026-08-20). */
 function renderizarFases() {
   const container = document.getElementById("lista-fases");
   container.innerHTML = "";
   let faseAtual = null;
   let grupo = null;
   let numeroSecao = 0;
+  const vezesPorFase = new Map();
   for (const etapa of etapasCache) {
     if (etapa.fase !== faseAtual) {
       faseAtual = etapa.fase;
       numeroSecao += 1;
+      const vezes = (vezesPorFase.get(faseAtual) ?? 0) + 1;
+      vezesPorFase.set(faseAtual, vezes);
       grupo = document.createElement("div");
       grupo.className = "fase-grupo";
       const titulo = document.createElement("div");
       titulo.className = "fase-titulo";
-      titulo.textContent = `${numeroSecao}. ${FASE_LABELS[faseAtual] ?? `Fase ${faseAtual}`}`;
+      const sufixo = vezes > 1 ? ` (retomada, ${vezes}ª vez nesta esteira)` : "";
+      titulo.textContent = `${numeroSecao}. ${FASE_LABELS[faseAtual] ?? `Fase ${faseAtual}`}${sufixo}`;
       grupo.appendChild(titulo);
       container.appendChild(grupo);
     }
@@ -784,17 +791,27 @@ function init() {
     const email = document.getElementById("login-email").value.trim();
     const senha = document.getElementById("login-senha").value;
     const erroEl = document.getElementById("login-erro");
+    const botao = ev.target.querySelector('button[type="submit"]');
     erroEl.hidden = true;
+    botao.disabled = true;
+    botao.textContent = "Entrando...";
 
-    const resultado = await api().autenticar(email, senha);
-    if (!resultado.sucesso) {
-      erroEl.textContent = resultado.erro;
+    try {
+      const resultado = await api().autenticar(email, senha);
+      if (!resultado.sucesso) {
+        erroEl.textContent = resultado.erro;
+        erroEl.hidden = false;
+        return;
+      }
+      document.getElementById("login-overlay").remove();
+      inicializarAppAutenticado();
+    } catch (e) {
+      erroEl.textContent = "Erro inesperado ao tentar entrar. Tente novamente.";
       erroEl.hidden = false;
-      return;
+    } finally {
+      botao.disabled = false;
+      botao.textContent = "Entrar";
     }
-
-    document.getElementById("login-overlay").remove();
-    inicializarAppAutenticado();
   });
 }
 

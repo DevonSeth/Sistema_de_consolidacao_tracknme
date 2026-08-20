@@ -310,15 +310,23 @@ class Api:
         troca o header Authorization do client inteiro pro JWT da sessão
         recém-logada, o que quebraria todas as chamadas de negócio
         seguintes (elas rodariam com o token do operador, não service_role,
-        sem nenhuma policy de RLS pensada pra isso)."""
+        sem nenhuma policy de RLS pensada pra isso).
+
+        Achado 2026-08-19: `carregar_config`/`create_client` ficavam FORA
+        do `try` (só `sign_in_with_password` era protegido) -- qualquer
+        exceção aí subia crua pela ponte JS/Python do pywebview, travando
+        a tela de login sem nenhum erro visível (o front nem tinha
+        `try/catch` no `await`, ver `ui/web/app.js::init`). Agora todo o
+        corpo está protegido e a mensagem de erro reflete a exceção real
+        em vez de mascarar tudo como "E-mail ou senha inválidos."."""
         from supabase import create_client
 
-        cfg = manager.carregar_config()["supabase"]
-        cliente_login = create_client(cfg["url"], cfg["service_role_key"])
         try:
+            cfg = manager.carregar_config()["supabase"]
+            cliente_login = create_client(cfg["url"], cfg["service_role_key"])
             resposta = cliente_login.auth.sign_in_with_password({"email": email, "password": senha})
-        except Exception:
-            return _para_json_seguro({"sucesso": False, "erro": "E-mail ou senha inválidos."})
+        except Exception as e:  # noqa: BLE001 - qualquer falha aqui vira erro visível, nunca escapa muda
+            return _para_json_seguro({"sucesso": False, "erro": f"Falha ao autenticar: {e}"})
 
         papel = (resposta.user.app_metadata or {}).get("role") if resposta.user else None
         if papel != "operador":
