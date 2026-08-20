@@ -151,6 +151,14 @@ export const META: Record<string, MetaParametro> = {
     sufixo: "proporção 0-1",
     aviso: "Baseline real medido: ~0%.",
   },
+  sga_http_timeout_base_ms: {
+    label: "Timeout de segurança por tentativa (SGA)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "ms (dobra a cada tentativa)",
+    aviso:
+      "Achado 2026-08-20: uma consulta sem timeout travou o Painel Operador por ~45min sem erro nenhum (trava no processo Node do Playwright, por baixo do timeout dele mesmo). Esse valor é a base — dobra a cada retry (ex: 30s/60s/120s com 3 tentativas).",
+  },
   tracknme_http_habilitado: {
     label: "Abrir/concluir incidente via HTTP (sem navegador)",
     categoria: "desempenho",
@@ -177,6 +185,14 @@ export const META: Record<string, MetaParametro> = {
     tipo: "numero",
     sufixo: "proporção 0-1",
     aviso: "Ainda sem baseline real medido em escala — valor inicial igual ao do SGA.",
+  },
+  tracknme_http_timeout_base_ms: {
+    label: "Timeout de segurança por tentativa (Track N'Me)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "ms (dobra a cada tentativa)",
+    aviso:
+      "Mesma proteção do SGA (achado 2026-08-20) — defesa em profundidade além do timeout=30s já configurado no cliente HTTP do Track N'Me.",
   },
 };
 

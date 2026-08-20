@@ -1,7 +1,9 @@
 import asyncio
+import time
 
 import pytest
 
+from integrations import playwright_utils as pu
 from integrations.playwright_utils import (
     AguardandoReconexao,
     CancelamentoSolicitado,
@@ -435,3 +437,111 @@ async def test_http_concorrencia_real_nunca_excede_o_limite_configurado():
 
     assert len(resultados) == 30
     assert pico_simultaneas <= 5
+
+
+# --- timeout_segundos (achado 2026-08-20: trava indefinida no processo -----
+# Node do Playwright, sem timeout nenhum, travou o Painel Operador ~45min) --
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_sem_timeout_trava_para_sempre_se_acao_nunca_retorna():
+    """Documenta o comportamento ANTES do fix (timeout_segundos=None,
+    default) -- serve de contraste pro teste seguinte, que prova que
+    timeout_segundos resolve. Usa um timeout de teste MENOR que o sleep
+    da ação simulada só pra confirmar que, sem timeout_segundos, o
+    asyncio.wait_for do PRÓPRIO TESTE é quem teria que interromper (a
+    função em si nunca desistiria sozinha)."""
+    async def acao_trava(page, item):
+        await asyncio.sleep(10)
+        return "nunca chega aqui"
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            pu._executar_com_tentativas(object(), "x", acao_trava, max_tentativas=1), timeout=0.05
+        )
+
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_timeout_segundos_interrompe_acao_travada():
+    async def acao_trava(page, item):
+        await asyncio.sleep(10)
+        return "nunca chega aqui"
+
+    resultado = await asyncio.wait_for(
+        pu._executar_com_tentativas(object(), "x", acao_trava, max_tentativas=1, timeout_segundos=0.01),
+        timeout=1,
+    )
+
+    assert resultado.sucesso is False
+    assert "timeout" in resultado.erro
+
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_timeout_dobra_a_cada_tentativa(monkeypatch):
+    """`acao_trava` usa um `asyncio.Event` que nunca é sinalizado (em vez
+    de `asyncio.sleep`) pra travar de propósito sem depender de
+    `asyncio.sleep` -- isso permite fazer o BACKOFF entre tentativas
+    (`asyncio.sleep(2**tentativa)`, real, não relacionado ao timeout desta
+    mudança) instantâneo via monkeypatch, sem acelerar/quebrar a trava
+    simulada em si."""
+    async def _sleep_instantaneo(segundos):
+        return None
+
+    monkeypatch.setattr(pu.asyncio, "sleep", _sleep_instantaneo)
+
+    duracoes_tentativa = []
+
+    async def acao_trava(page, item):
+        inicio = time.monotonic()
+        try:
+            await asyncio.Event().wait()  # nunca sinalizado -- trava até ser cancelado por wait_for
+        finally:
+            duracoes_tentativa.append(time.monotonic() - inicio)
+        return "nunca chega aqui"
+
+    resultado = await asyncio.wait_for(
+        pu._executar_com_tentativas(object(), "x", acao_trava, max_tentativas=3, timeout_segundos=0.02),
+        timeout=1,
+    )
+
+    assert resultado.sucesso is False
+    assert len(duracoes_tentativa) == 3
+    # 1ª ~0.02s, 2ª ~0.04s, 3ª ~0.08s -- cada uma pelo menos o dobro da anterior
+    assert duracoes_tentativa[1] > duracoes_tentativa[0] * 1.5
+    assert duracoes_tentativa[2] > duracoes_tentativa[1] * 1.5
+
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_timeout_none_preserva_comportamento_atual():
+    async def acao_rapida(page, item):
+        return "ok"
+
+    resultado = await pu._executar_com_tentativas(object(), "x", acao_rapida, max_tentativas=1)
+
+    assert resultado.sucesso is True
+    assert resultado.resultado == "ok"
+
+
+@pytest.mark.asyncio
+async def test_http_item_travado_nao_impede_resto_da_fila_nem_trava_a_funcao():
+    """Reproduz o sintoma real de 2026-08-20: 1 item trava pra sempre —
+    com timeout_segundos configurado, processar_fila_http ainda assim
+    retorna (o item travado vira falha, o resto processa normal),
+    em vez de travar o Painel inteiro."""
+    async def acao(request_context, item):
+        if item == "trava":
+            await asyncio.sleep(10)
+        return "ok"
+
+    resultados = await asyncio.wait_for(
+        processar_fila_http(
+            object(), ["trava", "rapido-1", "rapido-2"], acao, concorrencia=3,
+            max_tentativas=1, timeout_segundos=0.02,
+        ),
+        timeout=1,
+    )
+
+    por_item = {r.item: r for r in resultados}
+    assert por_item["trava"].sucesso is False
+    assert "timeout" in por_item["trava"].erro
+    assert por_item["rapido-1"].sucesso is True
+    assert por_item["rapido-2"].sucesso is True

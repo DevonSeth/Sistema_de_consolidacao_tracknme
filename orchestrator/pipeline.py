@@ -419,6 +419,7 @@ async def _etapa_incidente_2_estagios(
         tamanho_canario = min(int(parametros.get("tracknme_http_tamanho_canario", 20)), len(itens))
         canario, resto = itens[:tamanho_canario], itens[tamanho_canario:]
         concorrencia = int(parametros.get("tracknme_http_concorrencia", 10))
+        timeout_segundos = int(parametros.get("tracknme_http_timeout_base_ms", 30000)) / 1000
         fase_http_atual = "canario"
         itens_playwright_pendentes = []
 
@@ -428,7 +429,7 @@ async def _etapa_incidente_2_estagios(
                 resultados_canario = await playwright_utils.processar_fila_http(
                     contexto_http, canario, acao_http, concorrencia=concorrencia,
                     on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                    on_item_iniciado=on_item_iniciado,
+                    on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
                 )
                 resultados_totais.extend(resultados_canario)
 
@@ -440,7 +441,7 @@ async def _etapa_incidente_2_estagios(
                     resultados_resto = await playwright_utils.processar_fila_http(
                         contexto_http, resto, acao_http, concorrencia=concorrencia,
                         on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                        on_item_iniciado=on_item_iniciado,
+                        on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
                     )
                     resultados_totais.extend(resultados_resto)
             finally:
@@ -902,6 +903,7 @@ async def etapa_enriquecimento_sga(
         tamanho_canario = min(int(parametros.get("sga_http_tamanho_canario", 200)), len(chassis_chassi))
         canario, resto = chassis_chassi[:tamanho_canario], chassis_chassi[tamanho_canario:]
         concorrencia = int(parametros.get("sga_http_concorrencia", 80))
+        timeout_segundos = int(parametros.get("sga_http_timeout_base_ms", 30000)) / 1000
         fase_http_atual = "canario"
 
         try:
@@ -912,7 +914,7 @@ async def etapa_enriquecimento_sga(
                     resultados_canario = await playwright_utils.processar_fila_http(
                         request_context, canario, _consultar_http, concorrencia=concorrencia,
                         on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                        on_item_iniciado=on_item_iniciado,
+                        on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
                     )
                     resultados_totais.extend(resultados_canario)
 
@@ -924,7 +926,7 @@ async def etapa_enriquecimento_sga(
                         resultados_resto = await playwright_utils.processar_fila_http(
                             request_context, resto, _consultar_http, concorrencia=concorrencia,
                             on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                            on_item_iniciado=on_item_iniciado,
+                            on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
                         )
                         resultados_totais.extend(resultados_resto)
                 finally:

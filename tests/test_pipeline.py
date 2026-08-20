@@ -850,6 +850,62 @@ async def test_etapa_abrir_incidentes_automaticos_kill_switch_desligado_nunca_us
 
 
 @pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_repassa_timeout_configurado(monkeypatch):
+    """Mesmo achado 2026-08-20 do SGA (ver teste equivalente em
+    etapa_enriquecimento_sga) — tracknme_http_timeout_base_ms precisa
+    chegar em segundos até processar_fila_http."""
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"tracknme_http_habilitado": True, "tracknme_http_timeout_base_ms": 5000},
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    timeouts_recebidos = []
+
+    async def _processar_fila_http_fake(
+        contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+    ):
+        timeouts_recebidos.append(timeout_segundos)
+        return []
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_fake)
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(_DADOS_GRUPOS_FAKE)
+
+    assert resultado.sucesso is True
+    assert timeouts_recebidos
+    assert all(t == 5.0 for t in timeouts_recebidos)
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_timeout_usa_default_quando_parametro_ausente(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros", lambda: {"tracknme_http_habilitado": True},
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    timeouts_recebidos = []
+
+    async def _processar_fila_http_fake(
+        contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+    ):
+        timeouts_recebidos.append(timeout_segundos)
+        return []
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_fake)
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(_DADOS_GRUPOS_FAKE)
+
+    assert resultado.sucesso is True
+    assert timeouts_recebidos
+    assert all(t == 30.0 for t in timeouts_recebidos)
+
+
+@pytest.mark.asyncio
 async def test_etapa_abrir_incidentes_automaticos_circuit_breaker_aborta_resto_pro_playwright(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
     monkeypatch.setattr(
@@ -941,7 +997,7 @@ async def test_etapa_abrir_incidentes_automaticos_reconexao_no_estagio_http_incl
 
     async def _processar_fila_http_levanta_reconexao(
         contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
-        on_progresso=None, cancelar_checker=None, on_item_iniciado=None,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
     ):
         raise orch.playwright_utils.AguardandoReconexao(pendentes=list(itens), processados=[])
 
@@ -1529,6 +1585,71 @@ async def test_etapa_enriquecimento_sga_http_habilitado_mistura_chassi_e_placa(m
 
 
 @pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_repassa_timeout_configurado_pro_processar_fila_http(monkeypatch):
+    """Achado 2026-08-20: sga_http_timeout_base_ms (system_parameters)
+    precisa chegar em segundos até processar_fila_http -- sem isso, o
+    cinto de segurança contra trava indefinida (ver test_playwright_utils)
+    nunca é ativado de verdade em produção."""
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"sga_http_habilitado": True, "sga_http_timeout_base_ms": 5000},
+    )
+
+    async def _preparar_contexto_http_fake(playwright, browser_arg, context_arg):
+        return _RequestContextHttpFake(), {}
+
+    monkeypatch.setattr(orch.sga_bot, "preparar_contexto_http", _preparar_contexto_http_fake)
+
+    timeouts_recebidos = []
+
+    async def _processar_fila_http_fake(
+        request_context, itens, acao, concorrencia=80, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+    ):
+        timeouts_recebidos.append(timeout_segundos)
+        return []
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, _INSTALACAO_REMOCAO_FAKE)
+
+    assert resultado.sucesso is True
+    assert timeouts_recebidos  # confirma que o Estágio HTTP rodou de verdade (X2 é chassi confirmado)
+    assert all(t == 5.0 for t in timeouts_recebidos)  # 5000ms -> 5.0s
+
+
+@pytest.mark.asyncio
+async def test_etapa_enriquecimento_sga_timeout_usa_default_quando_parametro_ausente(monkeypatch):
+    _preparar_mocks_sga(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros", lambda: {"sga_http_habilitado": True},
+    )
+
+    async def _preparar_contexto_http_fake(playwright, browser_arg, context_arg):
+        return _RequestContextHttpFake(), {}
+
+    monkeypatch.setattr(orch.sga_bot, "preparar_contexto_http", _preparar_contexto_http_fake)
+
+    timeouts_recebidos = []
+
+    async def _processar_fila_http_fake(
+        request_context, itens, acao, concorrencia=80, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+    ):
+        timeouts_recebidos.append(timeout_segundos)
+        return []
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_fake)
+
+    resultado = await orch.etapa_enriquecimento_sga(_DADOS_GRUPOS_FAKE, _INSTALACAO_REMOCAO_FAKE)
+
+    assert resultado.sucesso is True
+    assert timeouts_recebidos
+    assert all(t == 30.0 for t in timeouts_recebidos)  # default 30000ms -> 30.0s
+
+
+@pytest.mark.asyncio
 async def test_etapa_enriquecimento_sga_kill_switch_desligado_nunca_usa_http(monkeypatch):
     _preparar_mocks_sga(monkeypatch)  # buscar_parametros -> {} (sga_http_habilitado ausente = desligado)
 
@@ -1606,7 +1727,7 @@ async def test_etapa_enriquecimento_sga_reconexao_no_estagio_http_inclui_placa_p
 
     async def _processar_fila_http_levanta_reconexao(
         request_context, chassis, acao, concorrencia=80, max_tentativas=3,
-        on_progresso=None, cancelar_checker=None, on_item_iniciado=None,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
     ):
         raise orch.playwright_utils.AguardandoReconexao(pendentes=list(chassis), processados=[])
 

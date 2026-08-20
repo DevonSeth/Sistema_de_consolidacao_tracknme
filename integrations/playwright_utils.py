@@ -78,14 +78,33 @@ async def _executar_com_tentativas(
     item: Any,
     acao: Callable[[Any, Any], Awaitable[Any]],
     max_tentativas: int,
+    timeout_segundos: float | None = None,
 ) -> ResultadoItem:
+    """`timeout_segundos` (achado 2026-08-20): quando informado, cada
+    tentativa é envolvida em `asyncio.wait_for`, dobrando a cada retry
+    (`timeout_segundos * 2**(tentativa-1)`) -- cancela o `await` de dentro
+    pra fora depois de N segundos INDEPENDENTE de onde a trava esteja, ao
+    contrário do timeout interno do Playwright/httpx (que pode nunca
+    disparar se a trava for no processo Node do Playwright por baixo, via
+    IPC -- foi exatamente isso que travou o Painel Operador por ~45min
+    numa rodada real do SGA, sem erro nenhum). `None` (default) preserva o
+    comportamento de antes -- usado só pelos 2 call sites HTTP
+    (`_rodar_round_http`); o caminho Playwright com página real
+    (`_rodar_round`) já tem timeouts granulares em cada ação da página."""
     ultimo_erro: str | None = None
     for tentativa in range(1, max_tentativas + 1):
         try:
-            resultado = await acao(page, item)
+            chamada = acao(page, item)
+            if timeout_segundos is not None:
+                chamada = asyncio.wait_for(chamada, timeout=timeout_segundos * (2 ** (tentativa - 1)))
+            resultado = await chamada
             return ResultadoItem(item=item, sucesso=True, resultado=resultado, tentativas=tentativa)
         except SessaoCaidaError:
             raise
+        except asyncio.TimeoutError:
+            ultimo_erro = f"timeout ({timeout_segundos * (2 ** (tentativa - 1)):.0f}s) sem resposta"
+            if tentativa < max_tentativas:
+                await asyncio.sleep(2**tentativa)
         except Exception as e:  # noqa: BLE001 - queremos capturar qualquer falha técnica do item
             ultimo_erro = str(e)
             if tentativa < max_tentativas:
@@ -258,6 +277,7 @@ async def _rodar_round_http(
     on_item_concluido: Callable[[], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
+    timeout_segundos: float | None = None,
 ) -> tuple[list[ResultadoItem], SessaoCaidaError | None, list, bool]:
     fila: asyncio.Queue = asyncio.Queue()
     for item in itens:
@@ -280,7 +300,9 @@ async def _rodar_round_http(
             if on_item_iniciado is not None:
                 on_item_iniciado(worker_id, item)
             try:
-                resultado = await _executar_com_tentativas(request_context, item, acao, max_tentativas)
+                resultado = await _executar_com_tentativas(
+                    request_context, item, acao, max_tentativas, timeout_segundos
+                )
                 resultados.append(resultado)
                 if on_item_concluido is not None:
                     on_item_concluido()
@@ -311,6 +333,7 @@ async def processar_fila_http(
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
+    timeout_segundos: float | None = None,
 ) -> list[ResultadoItem]:
     """Processa `itens` via HTTP puro, sem `Page`/`BrowserContext.
     new_page()` nenhuma -- `concorrencia` tarefas `asyncio` competem por
@@ -328,7 +351,12 @@ async def processar_fila_http(
     `AguardandoReconexao`, nunca gasta tentativas à toa. 2 rounds de retry
     (round 1 fila inteira, round 2 só quem falhou), `on_progresso`/
     `on_item_iniciado`/`cancelar_checker` com o mesmo significado de
-    `processar_fila` (ver docstring de lá — não repetido aqui)."""
+    `processar_fila` (ver docstring de lá — não repetido aqui).
+
+    `timeout_segundos` (achado 2026-08-20, ver `_executar_com_tentativas`):
+    cinto de segurança contra trava indefinida numa requisição individual
+    (ex: processo Node do Playwright travado por baixo) — `None` (default)
+    preserva o comportamento de antes."""
     if not itens:
         return []
 
@@ -345,7 +373,7 @@ async def processar_fila_http(
 
     resultados_r1, sessao_caida, pendentes, cancelado = await _rodar_round_http(
         request_context, itens, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado,
+        on_item_iniciado, timeout_segundos,
     )
     if sessao_caida is not None:
         raise AguardandoReconexao(pendentes=pendentes, processados=resultados_r1)
@@ -358,7 +386,7 @@ async def processar_fila_http(
 
     resultados_r2, sessao_caida2, pendentes2, cancelado2 = await _rodar_round_http(
         request_context, falharam, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado,
+        on_item_iniciado, timeout_segundos,
     )
     if sessao_caida2 is not None:
         raise AguardandoReconexao(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)
