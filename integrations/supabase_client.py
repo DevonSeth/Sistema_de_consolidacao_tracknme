@@ -100,6 +100,7 @@ from functools import lru_cache
 from supabase import Client, ClientOptions, create_client
 
 from config import manager
+from integrations.retry_utils import retry_erro_transitorio_windows
 from core.constants import (
     ORIGEM_INSTALACAO,
     ORIGEM_MANUTENCAO,
@@ -151,6 +152,7 @@ def _agora_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+@retry_erro_transitorio_windows()
 def _registrar_transicao_status(tratativa_id: str, status_novo: str) -> None:
     """Histórico de mudança de status de uma tratativa (`historico_status_
     tratativa`, Passo 1 do Dashboard) — alimenta a reconstrução "como
@@ -163,6 +165,7 @@ def _registrar_transicao_status(tratativa_id: str, status_novo: str) -> None:
     ).execute()
 
 
+@retry_erro_transitorio_windows()
 def _registrar_transicao_puma(puma_id: str, tratativa_id: str, status_novo: str) -> None:
     """Espelho de `_registrar_transicao_status` para `puma_encaminhamentos`
     (`historico_status_puma`) — `tratativa_id` denormalizado aqui de
@@ -194,6 +197,7 @@ def get_client() -> Client:
     )
 
 
+@retry_erro_transitorio_windows()
 def buscar_elegiveis_para_disparo() -> list[dict]:
     """Tratativas marcadas pelo atendente (`selecionado=True`) e ainda dentro
     do ciclo de mensagens automáticas (não bloqueadas por SGA, não escaladas
@@ -213,6 +217,7 @@ def buscar_elegiveis_para_disparo() -> list[dict]:
     return resposta.data
 
 
+@retry_erro_transitorio_windows()
 def buscar_candidatas_escalonamento_ligacao() -> list[dict]:
     """Tratativas ainda no ciclo de mensagens (`status='aguardando_resposta'`)
     — elegibilidade fina (tentativas >= 3, sem `situacao_manual`) é
@@ -231,6 +236,7 @@ def buscar_candidatas_escalonamento_ligacao() -> list[dict]:
     return resposta.data
 
 
+@retry_erro_transitorio_windows()
 def buscar_candidatas_finalizacao_atendimento() -> list[dict]:
     """Tratativas com um atendimento Newmo aberto (`atendimento_id IS NOT
     NULL`) e ainda no ciclo de mensagens — candidatas da rotina noturna
@@ -250,6 +256,7 @@ def buscar_candidatas_finalizacao_atendimento() -> list[dict]:
     return resposta.data
 
 
+@retry_erro_transitorio_windows()
 def upsert_tratativa(dados: dict) -> None:
     """Insere uma tratativa nova ou atualiza a existente, usando
     `chave_unica` (ver core.dedup.gerar_chave_unica) como chave de busca —
@@ -283,6 +290,7 @@ def upsert_tratativa(dados: dict) -> None:
         _registrar_transicao_status(nova_id, payload["status"])
 
 
+@retry_erro_transitorio_windows()
 def buscar_estado_disparo_por_chaves(chaves: list[str]) -> dict[str, dict]:
     """Estado do ciclo de disparo (Fase F, ainda não implementada) por
     `chave_unica` — usado pela Fase E (`orchestrator.pipeline.
@@ -313,6 +321,7 @@ def buscar_estado_disparo_por_chaves(chaves: list[str]) -> dict[str, dict]:
     return {linha["chave_unica"]: linha for linha in linhas}
 
 
+@retry_erro_transitorio_windows()
 def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]:
     """Valor ATUAL de `situacao_manual` por `chave_unica`, antes da
     sincronização do ciclo — usada por `orchestrator.pipeline.
@@ -335,6 +344,7 @@ def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]
     return {linha["chave_unica"]: linha.get("situacao_manual") or "" for linha in linhas}
 
 
+@retry_erro_transitorio_windows()
 def buscar_tratativa_por_chave(chave_unica: str) -> dict | None:
     """Tratativa completa por `chave_unica` — usado pela Fase F.4
     (`orchestrator.pipeline.etapa_processar_resultado_ligacao`) pra
@@ -349,6 +359,7 @@ def buscar_tratativa_por_chave(chave_unica: str) -> dict | None:
     return linhas[0] if linhas else None
 
 
+@retry_erro_transitorio_windows()
 def sincronizar_campos_atendente(chave_unica: str, campos: dict) -> None:
     """Grava de volta no Supabase os campos que só o atendente edita na
     planilha Operacional (`Selecionado`, `Técnico`, `Situação Manual`,
@@ -382,6 +393,7 @@ def sincronizar_campos_atendente(chave_unica: str, campos: dict) -> None:
             _registrar_transicao_status(tratativa["id"], campos["status"])
 
 
+@retry_erro_transitorio_windows()
 def atualizar_apos_envio(
     tratativa_id: str, atendimento_id: int, mensagem_id: int, status: str
 ) -> None:
@@ -419,6 +431,7 @@ def atualizar_apos_envio(
     _registrar_transicao_status(tratativa_id, status)
 
 
+@retry_erro_transitorio_windows()
 def marcar_contato_invalido(tratativa_id: str) -> None:
     """Cod 7 da Newmo (telefone não registrado no WhatsApp) — marca
     `status_contato`, **sem** tocar `tentativas`/`ultimo_disparo` (decisão
@@ -431,6 +444,7 @@ def marcar_contato_invalido(tratativa_id: str) -> None:
     ).eq("id", tratativa_id).execute()
 
 
+@retry_erro_transitorio_windows()
 def buscar_por_atendimento_id(atendimento_id: int) -> dict | None:
     """Usado pelo fluxo de resposta do webhook (a Edge Function grava em
     `tratativas`; o app só lê o resultado já gravado por `atendimento_id`,
@@ -453,6 +467,7 @@ def buscar_por_atendimento_id(atendimento_id: int) -> dict | None:
 _STATUS_RETORNO_TARDIO = [STATUS_AGUARDANDO_LIGACAO, STATUS_ENCAMINHADO_PUMA, STATUS_FINALIZADO]
 
 
+@retry_erro_transitorio_windows()
 def buscar_candidatas_alertas() -> dict[str, list[dict]]:
     """As duas fontes da aba "Alertas" (Fase F.5), já separadas por tipo —
     evita o orchestrator precisar redetectar qual caso é qual a partir dos
@@ -484,6 +499,7 @@ def buscar_candidatas_alertas() -> dict[str, list[dict]]:
     return {"retorno_tardio": retorno_tardio, "agendado_sem_data": agendado_sem_data}
 
 
+@retry_erro_transitorio_windows()
 def marcar_aguardando_ligacao(tratativa_id: str) -> None:
     """3 tentativas de mensagem sem resposta -> escala para ligação
     (tentativa única, feita pelo atendente)."""
@@ -494,6 +510,7 @@ def marcar_aguardando_ligacao(tratativa_id: str) -> None:
     _registrar_transicao_status(tratativa_id, STATUS_AGUARDANDO_LIGACAO)
 
 
+@retry_erro_transitorio_windows()
 def registrar_ligacao(tratativa_id: str, dados_ligacao: dict) -> None:
     """Grava a tentativa de ligação em `ligacoes` (data_contato, retornou,
     conseguiu_agendar, observacao, registrado_por).
@@ -517,6 +534,7 @@ def registrar_ligacao(tratativa_id: str, dados_ligacao: dict) -> None:
         _registrar_transicao_status(tratativa_id, STATUS_FINALIZADO)
 
 
+@retry_erro_transitorio_windows()
 def encaminhar_puma(tratativa_id: str, motivo: str) -> None:
     """Ligação sem sucesso em agendar -> encaminha automaticamente pro Puma:
     grava em `puma_encaminhamentos` e marca a tratativa como
@@ -535,6 +553,7 @@ def encaminhar_puma(tratativa_id: str, motivo: str) -> None:
     _registrar_transicao_status(tratativa_id, STATUS_ENCAMINHADO_PUMA)
 
 
+@retry_erro_transitorio_windows()
 def _puma_id_mais_recente(tratativa_id: str) -> str:
     """Id do encaminhamento MAIS RECENTE da tratativa (`data_
     encaminhamento` desc) em `puma_encaminhamentos` — compartilhado por
@@ -558,6 +577,7 @@ def _puma_id_mais_recente(tratativa_id: str) -> str:
     return encontrados[0]["id"]
 
 
+@retry_erro_transitorio_windows()
 def sincronizar_status_puma(tratativa_id: str, status_novo: str) -> None:
     """Sincroniza de volta pro Supabase o status real de um encaminhamento
     pra Puma — hoje só existe editado manualmente na coluna "Status" da
@@ -577,6 +597,7 @@ def sincronizar_status_puma(tratativa_id: str, status_novo: str) -> None:
     _registrar_transicao_puma(puma_id, tratativa_id, status_novo)
 
 
+@retry_erro_transitorio_windows()
 def sincronizar_observacao_puma(tratativa_id: str, observacao: str) -> None:
     """Sincroniza de volta pro Supabase o texto que o time da Puma anota
     na coluna "Observação Puma" da aba "Encaminhar pra Puma" — igual
@@ -602,6 +623,7 @@ def _coagir_valor(valor: str):
     return valor_normalizado
 
 
+@retry_erro_transitorio_windows()
 def buscar_parametros() -> dict:
     """system_parameters -> dict {chave: valor} com coerção básica de tipo."""
     client = get_client()
@@ -609,6 +631,7 @@ def buscar_parametros() -> dict:
     return {linha["chave"]: _coagir_valor(linha["valor"]) for linha in linhas}
 
 
+@retry_erro_transitorio_windows()
 def buscar_rule_templates() -> dict:
     """rule_templates (ativos) -> dict {codigo_regra: {...}} para consulta
     direta pelo motor de regras (core.motor_regras)."""
@@ -623,6 +646,7 @@ def buscar_rule_templates() -> dict:
     return {linha["codigo_regra"]: linha for linha in linhas}
 
 
+@retry_erro_transitorio_windows()
 def buscar_bases_ativas() -> list[dict]:
     """`bases` ativas — usado pra resolver o dropdown "Base" da aba
     Tratativas pro uuid real (`tratativas.base_id`) e pra montar as
@@ -631,6 +655,7 @@ def buscar_bases_ativas() -> list[dict]:
     return client.table("bases").select("id, nome, endereco").eq("ativo", True).execute().data
 
 
+@retry_erro_transitorio_windows()
 def buscar_pontos_acao_ativos() -> list[dict]:
     """`pontos_acao` ativos — mesmo uso de `buscar_bases_ativas`, pro
     dropdown "Ponto de Ação" (`tratativas.ponto_acao_id`)."""
@@ -644,6 +669,7 @@ def buscar_pontos_acao_ativos() -> list[dict]:
     )
 
 
+@retry_erro_transitorio_windows()
 def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
     """Último status do SGA conhecido pra cada um de `chassis`, numa leitura
     só (`.in_(...)`) — achado 2026-08-17: a versão anterior lia 1 chassi
@@ -667,6 +693,7 @@ def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
     return {linha["chassi"]: linha for linha in linhas}
 
 
+@retry_erro_transitorio_windows()
 def upsert_situacoes_veiculo_sga_em_lote(registros: list[dict]) -> None:
     """Insere/atualiza `situacao_veiculo_sga` pra todos os `registros` numa
     gravação só (upsert em lote pela chave primária `chassi`) — mesmo
@@ -691,6 +718,7 @@ def upsert_situacoes_veiculo_sga_em_lote(registros: list[dict]) -> None:
     get_client().table("situacao_veiculo_sga").upsert(payloads, on_conflict="chassi").execute()
 
 
+@retry_erro_transitorio_windows()
 def registrar_log_execucao(
     execucao_id: str,
     etapa_id: str,
@@ -723,6 +751,7 @@ def registrar_log_execucao(
     ).execute()
 
 
+@retry_erro_transitorio_windows()
 def buscar_execucao_lock_atual() -> dict:
     """Estado atual da trava única (`execucao_lock`, linha seed
     `id='pipeline_diario'`) — usado pelo watchdog pra decidir se a
@@ -739,6 +768,7 @@ def buscar_execucao_lock_atual() -> dict:
     )
 
 
+@retry_erro_transitorio_windows()
 def buscar_ultimas_execucoes(limite_por_etapa: int = 5) -> dict[str, list[dict]]:
     """Últimas execuções de `log_execucoes`, agrupadas por `etapa_id`
     (mais recente primeiro) — alimenta o watchdog (etapa que falhou,
@@ -772,6 +802,7 @@ _ID_EXECUCAO_LOCK = "pipeline_diario"
 TTL_EXECUCAO_LOCK_MINUTOS = 120
 
 
+@retry_erro_transitorio_windows()
 def adquirir_execucao_lock(maquina: str, ttl_minutos: int = TTL_EXECUCAO_LOCK_MINUTOS) -> bool:
     """Trava a execução única do pipeline diário (linha `id='pipeline_diario'`
     em `execucao_lock`, Fase 2 — evita 2 máquinas processando a mesma fila do
@@ -810,6 +841,7 @@ def adquirir_execucao_lock(maquina: str, ttl_minutos: int = TTL_EXECUCAO_LOCK_MI
     return True
 
 
+@retry_erro_transitorio_windows()
 def liberar_execucao_lock() -> None:
     """Libera a trava ao final da execução — sempre num `finally`, pra não
     deixar travada pra sempre se o pipeline quebrar no meio."""
@@ -822,6 +854,7 @@ def liberar_execucao_lock() -> None:
 _STATUS_FORA_DE_PENDENCIA = [STATUS_FINALIZADO, STATUS_ENCAMINHADO_PUMA]
 
 
+@retry_erro_transitorio_windows()
 def contar_pendencias_por_origem() -> dict:
     """Contagem "agora" de tratativas ainda em aberto (fora do ciclo já
     concluído), agrupada por origem — alimenta os 3 cards de resumo do
@@ -848,6 +881,7 @@ _COLUNAS_DASHBOARD_OPERADOR = (
 )
 
 
+@retry_erro_transitorio_windows()
 def buscar_tratativas_abertas_para_dashboard_operador() -> list[dict]:
     """1 busca só, reaproveitada por todos os widgets A-F do "Painel de
     apoio" do Operador (`orchestrator.dashboards_operador.

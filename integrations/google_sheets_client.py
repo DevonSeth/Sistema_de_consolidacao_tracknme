@@ -102,6 +102,7 @@ from gspread.utils import (
 )
 
 from config import manager
+from integrations.retry_utils import retry_erro_transitorio_windows
 # Posições de coluna de 'Rastreadores Ativos' moram em core.constants (não
 # aqui) porque core/motor_regras.py também precisa delas e `core/` nunca
 # importa de `integrations/` — este módulo só reexporta.
@@ -228,6 +229,7 @@ def _worksheet(planilha: str, aba: str) -> gspread.Worksheet:
     return _spreadsheet(planilha).worksheet(aba)
 
 
+@retry_erro_transitorio_windows()
 def ler_aba(planilha: str, aba: str) -> list[dict]:
     """Lê uma aba inteira.
 
@@ -268,6 +270,7 @@ def ler_aba(planilha: str, aba: str) -> list[dict]:
     return registros
 
 
+@retry_erro_transitorio_windows()
 def reescrever_aba(planilha: str, aba: str, linhas: list[dict]) -> None:
     """Limpa a aba inteira e reescreve do zero (nunca edita célula a
     célula) — só permitido na planilha Operacional; o Administrador é
@@ -341,6 +344,7 @@ def _regra_formatacao_condicional(sheet_id: int, col_idx: int, tipo: str, valore
     }
 
 
+@retry_erro_transitorio_windows()
 def configurar_formatacao_condicional(limiar_dias_sem_contato: int = 7) -> None:
     """Configura formatação condicional de cor nas 3 abas operacionais —
     SETUP ÚNICO, não faz parte do pipeline recorrente (mesma natureza da
@@ -440,6 +444,7 @@ _LINHA_LIMITE_VALIDACAO = 300  # mesmo limite já usado no setup (não versionad
 # Sheets tratar célula nunca escrita como "com valor", gerando linha fantasma.
 
 
+@retry_erro_transitorio_windows()
 def limpar_validacoes_aba(aba: str) -> None:
     """Remove QUALQUER validação de dado (checkbox/dropdown) de toda a
     faixa de dados da aba — SETUP, mesma natureza dos `configurar_*`.
@@ -482,6 +487,7 @@ def _coluna_letra(indice_1based: int) -> str:
     return letras
 
 
+@retry_erro_transitorio_windows()
 def configurar_validacao_atendimento(
     nomes_bases: list[str], nomes_pontos_acao: list[str]
 ) -> None:
@@ -535,6 +541,7 @@ def _configurar_checkbox(aba: str, coluna: str) -> None:
     ws.add_validation(intervalo, ValidationConditionType.boolean, [], strict=True)
 
 
+@retry_erro_transitorio_windows()
 def configurar_checkbox_finalizado_pendente_ligacao() -> None:
     """Configura a validação BOOLEAN (checkbox) da coluna "Finalizado" na
     aba "Pendente de Ligação" — SETUP, mesma natureza de
@@ -555,6 +562,7 @@ _COLUNAS_CHECKBOX_TRATATIVAS = [
 ]
 
 
+@retry_erro_transitorio_windows()
 def configurar_checkboxes_tratativas() -> None:
     """Configura a validação BOOLEAN (checkbox) das 4 colunas booleanas de
     "Tratativas" — SETUP, mesma natureza de
@@ -574,6 +582,7 @@ def configurar_checkboxes_tratativas() -> None:
 _SITUACAO_MANUAL_VALORES = ["Agendado", "Cancelado", "Solicitação operacional"]
 
 
+@retry_erro_transitorio_windows()
 def configurar_validacao_situacao_manual() -> None:
     """Configura o dropdown da coluna "Situação Manual" em "Tratativas" —
     SETUP, mesma natureza de `configurar_validacao_atendimento`/
@@ -600,6 +609,7 @@ def configurar_validacao_situacao_manual() -> None:
 _RETORNOU_CONSEGUIU_AGENDAR_VALORES = ["Sim", "Não"]
 
 
+@retry_erro_transitorio_windows()
 def configurar_validacao_retornou_conseguiu_agendar() -> None:
     """Configura os dropdowns de `Retornou?`/`Conseguiu Agendar?` em
     `Pendente de Ligação` — SETUP, mesma natureza de
@@ -629,6 +639,7 @@ def configurar_validacao_retornou_conseguiu_agendar() -> None:
 _STATUS_PUMA_VALORES = ["aguardando_acao", "em_andamento", "concluido"]
 
 
+@retry_erro_transitorio_windows()
 def configurar_validacao_status_puma() -> None:
     """Configura o dropdown da coluna `Status` em `Encaminhar pra Puma` —
     SETUP, mesma natureza de `configurar_validacao_situacao_manual`.
@@ -700,6 +711,7 @@ def _runs_por_cor(cabecalho: list[str], colunas_equipe: set[str]) -> list[tuple[
     return runs
 
 
+@retry_erro_transitorio_windows()
 def configurar_formatacao_cabecalho() -> None:
     """Uniformiza a cor do cabeçalho (linha 1) das 5 abas operacionais —
     SETUP ÚNICO, mesma natureza de `configurar_formatacao_condicional`/
@@ -738,6 +750,7 @@ def configurar_formatacao_cabecalho() -> None:
 _ACAO_ALERTA_VALORES = ["Confirma conclusão", "Foi engano, ignorar"]
 
 
+@retry_erro_transitorio_windows()
 def configurar_validacao_alertas() -> None:
     """Configura o dropdown da coluna "Ação" na aba "Alertas" — SETUP,
     mesma natureza de `configurar_validacao_atendimento`/
@@ -776,6 +789,7 @@ _COLUNAS_TEXTO_RASTREADORES = [
 ]
 
 
+@retry_erro_transitorio_windows()
 def formatar_colunas_identificador_texto() -> None:
     """Formata como "Plain text" as colunas que guardam identificador "cara
     de número" — SETUP ÚNICO, mesma natureza de `configurar_formatacao_
@@ -863,6 +877,7 @@ def formatar_colunas_identificador_texto() -> None:
         )
 
 
+@retry_erro_transitorio_windows()
 def carregar_administrador(aba: str, linhas: list[list]) -> None:
     """Limpa e reescreve 'Incidentes' ou 'Rastreadores Ativos' na planilha
     Administrador a partir dos dados já baixados do Track N' Me (ver
