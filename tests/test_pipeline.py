@@ -381,6 +381,11 @@ def _preparar_mocks_playwright(monkeypatch):
 
     monkeypatch.setattr(orch, "async_playwright", lambda: _PlaywrightCtxFalso())
     monkeypatch.setattr(orch.tracknme_bot, "abrir_navegador_autenticado", _abrir_navegador_autenticado_fake)
+    # `tracknme_http_habilitado` ausente = kill switch desligado (default) --
+    # `_etapa_incidente_2_estagios` sempre lê `buscar_parametros()`, mesmo
+    # com o kill switch desligado, então precisa de um mock aqui pra não
+    # bater na rede de verdade (mesmo padrão de `_preparar_mocks_sga`).
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
     return contexto, browser
 
 
@@ -559,6 +564,7 @@ async def test_etapa_abrir_incidentes_automaticos_propaga_falha_do_motor_sem_abr
 @pytest.mark.asyncio
 async def test_etapa_abrir_incidentes_automaticos_falha_ao_abrir_navegador(monkeypatch):
     monkeypatch.setattr(orch, "async_playwright", lambda: _PlaywrightCtxFalso())
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
 
     async def _abrir_navegador_autenticado_falha(playwright):
         raise RuntimeError("Login automático falhou")
@@ -802,6 +808,7 @@ async def test_etapa_fechar_incidentes_automaticos_propaga_falha_da_consolidacao
 @pytest.mark.asyncio
 async def test_etapa_fechar_incidentes_automaticos_falha_ao_abrir_navegador(monkeypatch):
     monkeypatch.setattr(orch, "async_playwright", lambda: _PlaywrightCtxFalso())
+    monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
 
     async def _abrir_navegador_autenticado_falha(playwright):
         raise RuntimeError("Login automático falhou")
@@ -812,6 +819,160 @@ async def test_etapa_fechar_incidentes_automaticos_falha_ao_abrir_navegador(monk
 
     assert resultado.sucesso is False
     assert resultado.mensagem == "Login automático falhou"
+
+
+# --- Estágio HTTP de abrir/fechar_incidentes_automaticos (achado 2026-08-19) -
+
+
+class _ClienteHttpFalso:
+    async def aclose(self):
+        pass
+
+
+async def _preparar_contexto_http_falso():
+    return orch.tracknme_bot.ContextoHttp(cliente=_ClienteHttpFalso(), brand_id=1, user_id=1)
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_kill_switch_desligado_nunca_usa_http(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)  # buscar_parametros -> {} (kill switch ausente = desligado)
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente", _sempre_sucesso)
+
+    async def _abrir_incidente_http_nao_deveria_ser_chamado(contexto_http, placa, cliente):
+        raise AssertionError("não deveria chamar abrir_incidente_http com o kill switch desligado")
+
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente_http", _abrir_incidente_http_nao_deveria_ser_chamado)
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(_DADOS_GRUPOS_FAKE)
+
+    assert resultado.sucesso is True
+    assert "tracknme_http_abortado" not in resultado.dados
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_circuit_breaker_aborta_resto_pro_playwright(monkeypatch):
+    contexto, browser = _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {
+            "tracknme_http_habilitado": True, "tracknme_http_tamanho_canario": 1,
+            "tracknme_http_limiar_falha_tecnica": 0.1,
+        },
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    chamadas_http, chamadas_playwright = [], []
+
+    async def _abrir_incidente_http_falha(contexto_http, placa, cliente):
+        chamadas_http.append(placa)
+        raise RuntimeError("falha técnica simulada")
+
+    async def _abrir_incidente_sucesso(page, placa, cliente):
+        chamadas_playwright.append(placa)
+        return f"Incidente aberto para {placa}"
+
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente_http", _abrir_incidente_http_falha)
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente", _abrir_incidente_sucesso)
+
+    grupo_1_dois_itens = [
+        {"placa": "CANARIO", "chassi": "X1", "imei": "111", "cliente": "Fulano"},
+        {"placa": "RESTO", "chassi": "X2", "imei": "222", "cliente": "Beltrano"},
+    ]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1_dois_itens}
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(dados)
+
+    assert resultado.sucesso is True
+    assert resultado.dados["tracknme_http_abortado"]["motivo"] == "taxa_falha_tecnica"
+    # processar_fila_http tenta 2 rounds x 3 tentativas cada pro item do
+    # canário (que falha sempre) antes de desistir -- só importa que
+    # "RESTO" nunca passou por HTTP, indo direto pro Playwright.
+    assert set(chamadas_http) == {"CANARIO"}
+    assert chamadas_playwright == ["RESTO"]
+    assert resultado.dados["abertos"] == [grupo_1_dois_itens[1]]
+    assert resultado.dados["falhas"][0]["linha"] == grupo_1_dois_itens[0]
+    assert contexto.fechado is True
+    assert browser.fechado is True
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_duplicado_nao_dispara_circuit_breaker(monkeypatch):
+    # Achado ao vivo 2026-08-19 (teste de escala, 100 candidatos reais):
+    # 8% de IncidenteDuplicadoError, 0% de falha técnica de verdade -- o
+    # circuit breaker não deve contar duplicado como falha técnica.
+    contexto, browser = _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"tracknme_http_habilitado": True, "tracknme_http_limiar_falha_tecnica": 0.05},
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    async def _abrir_incidente_http_duplicado(contexto_http, placa, cliente):
+        raise orch.tracknme_bot.IncidenteDuplicadoError(f"incidente já aberto (placa={placa})")
+
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente_http", _abrir_incidente_http_duplicado)
+
+    # 10 itens, todos "duplicado" (100% > limiar de 5%) -- não deve abortar.
+    grupo_1_dez_itens = [
+        {"placa": f"DUP{i}", "chassi": f"X{i}", "imei": str(i), "cliente": "Fulano"} for i in range(10)
+    ]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1_dez_itens}
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(dados)
+
+    assert resultado.sucesso is True
+    assert "tracknme_http_abortado" not in resultado.dados
+    assert resultado.dados["abertos"] == []
+    assert len(resultado.dados["falhas"]) == 10
+
+
+@pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_reconexao_no_estagio_http_inclui_resto_pendente(monkeypatch):
+    # Achado 2026-08-19 (mesmo espírito do teste equivalente do SGA): se o
+    # Estágio HTTP cair durante o canário, o "resto" (que nunca chegou a
+    # ser tentado, nem por HTTP nem por Playwright) também precisa voltar
+    # em "pendentes" -- senão a retomada os perde.
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"tracknme_http_habilitado": True, "tracknme_http_tamanho_canario": 1},
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    async def _processar_fila_http_levanta_reconexao(
+        contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
+        on_progresso=None, cancelar_checker=None, on_item_iniciado=None,
+    ):
+        raise orch.playwright_utils.AguardandoReconexao(pendentes=list(itens), processados=[])
+
+    monkeypatch.setattr(orch.playwright_utils, "processar_fila_http", _processar_fila_http_levanta_reconexao)
+
+    grupo_1_dois_itens = [
+        {"placa": "CANARIO", "chassi": "X1", "imei": "111", "cliente": "Fulano"},
+        {"placa": "RESTO", "chassi": "X2", "imei": "222", "cliente": "Beltrano"},
+    ]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1_dois_itens}
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(dados)
+
+    assert resultado.sucesso is False
+    assert {p["placa"] for p in resultado.aguardando_reconexao["pendentes"]} == {"CANARIO", "RESTO"}
+
+
+@pytest.mark.asyncio
+async def test_etapa_fechar_incidentes_automaticos_kill_switch_desligado_nunca_usa_http(monkeypatch):
+    _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(orch.tracknme_bot, "concluir_incidente", _sempre_sucesso)
+
+    async def _concluir_incidente_http_nao_deveria_ser_chamada(contexto_http, placa, motivo, numero_incidente=None):
+        raise AssertionError("não deveria chamar concluir_incidente_http com o kill switch desligado")
+
+    monkeypatch.setattr(orch.tracknme_bot, "concluir_incidente_http", _concluir_incidente_http_nao_deveria_ser_chamada)
+
+    resultado = await orch.etapa_fechar_incidentes_automaticos(_DADOS_GRUPOS_FAKE)
+
+    assert resultado.sucesso is True
+    assert "tracknme_http_abortado" not in resultado.dados
 
 
 # --- etapa_enriquecimento_sga ------------------------------------------------

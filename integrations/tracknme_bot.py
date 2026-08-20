@@ -36,8 +36,10 @@ Seletores confirmados por captura Playwright ao vivo (2026-08-04):
 
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 import openpyxl
 from playwright.async_api import (
     Browser,
@@ -53,6 +55,17 @@ from integrations.playwright_utils import SessaoCaidaError, processar_fila
 
 URL_LOGIN = "https://broquelrastreamento.tracknme.com.br/monitoring/login"
 URL_TRACKBACK = "https://broquelrastreamento.tracknme.com.br/monitoring/trackback"
+
+# ---------------------------------------------------------------------------
+# Caminho HTTP puro (achado 2026-08-19: sem captcha, dá pra logar e operar
+# sem navegador nenhum -- ver `_handoff/investigacao_lag_relatorio_
+# tracknme.md` pro método completo de descoberta). Cobre só abrir/concluir
+# incidente por enquanto; download de relatórios continua via Playwright.
+# ---------------------------------------------------------------------------
+
+URL_BASE_API = "https://broquelrastreamento.tracknme.com.br/api"
+NOME_MARCA_ALVO = "PUMA NORDESTE"
+TIPO_SEM_COMUNICACAO_API = "NO_COMMUNICATION_48HS"
 URL_INDICADORES = "https://broquelrastreamento.tracknme.com.br/monitoring/indicators"
 
 SELETOR_CAMPO_EMAIL = 'input[name="email"]'
@@ -579,6 +592,25 @@ class MultiplosIncidentesAbertosError(RuntimeError):
     (`input[name="number"]`) pra esse caso (Sessão 5 de captura)."""
 
 
+_MARCADORES_ERRO_NEGOCIO_ESPERADO = ("incidente já aberto", "Mais de um incidente aberto")
+
+
+def eh_erro_de_negocio_esperado(mensagem: str | None) -> bool:
+    """True se `mensagem` (tipicamente `ResultadoItem.erro`, já uma string
+    -- `_executar_com_tentativas` só guarda `str(exceção)`, não o tipo)
+    vem de `IncidenteDuplicadoError`/`MultiplosIncidentesAbertosError` --
+    resultados de NEGÓCIO esperados (a API corretamente recusando
+    duplicado/ambíguo), não falha técnica. Achado ao vivo 2026-08-19,
+    teste de escala com 100 candidatos reais: 8% vieram de duplicado
+    (não de instabilidade técnica) -- um circuit breaker que conta isso
+    junto com falha técnica de verdade abortaria o caminho HTTP à toa.
+    Usado por `orchestrator.pipeline._avaliar_circuit_breaker_tracknme_
+    http` pra não contar esses casos no limiar."""
+    if not mensagem:
+        return False
+    return any(marcador in mensagem for marcador in _MARCADORES_ERRO_NEGOCIO_ESPERADO)
+
+
 async def _abrir_tela_operador(page: Page) -> None:
     """Navega até a tela "Operador" (fila de incidentes), de onde
     `concluir_incidente` busca o incidente aberto -- diferente de
@@ -722,3 +754,239 @@ async def concluir_incidente(
 async def _acao_concluir_incidente(page: Page, item: tuple[str, str]) -> str:
     placa, motivo = item
     return await concluir_incidente(page, placa, motivo)
+
+
+# ---------------------------------------------------------------------------
+# Caminho HTTP puro -- abrir_incidente_http() / concluir_incidente_http()
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ContextoHttp:
+    """Sessão HTTP autenticada, já resolvida pra marca certa (`NOME_MARCA_
+    ALVO`) -- devolvida por `preparar_contexto_http`, reaproveitada por
+    `abrir_incidente_http`/`concluir_incidente_http` (1 login por execução
+    do pipeline, não por item). Quem chama é responsável por fechar
+    `cliente` (`await contexto.cliente.aclose()`) quando terminar."""
+
+    cliente: httpx.AsyncClient
+    brand_id: int
+    user_id: int
+
+
+async def preparar_contexto_http() -> ContextoHttp:
+    """Login 100% automático via HTTP puro -- Track N' Me não tem captcha
+    (diferente do SGA), então não precisa de navegador nem de
+    `storage_state`: 1 `POST` de login já autentica a sessão inteira.
+
+    Corpo do login (`login`/`password`/`brand`/`persistent`/`type`) e o
+    header `Authorization` (setado como default do cliente HTTP depois do
+    login, não por request -- confirmado ao vivo que é assim que o app
+    real faz, `axios.defaults.headers.common.Authorization = accessToken`,
+    `accessToken` já vem com o prefixo `"Bearer "`) foram capturados do
+    tráfego de rede real de um login automático de produção (2026-08-19)
+    -- nunca documentados publicamente, só descobertos testando.
+
+    Levanta `RuntimeError` se a conta tiver mais de 1 marca raiz (login
+    ambíguo, nunca visto em produção até agora) ou se a árvore de marcas
+    não tiver `NOME_MARCA_ALVO`.
+    """
+    cfg = manager.carregar_config()["tracknme"]
+    cliente = httpx.AsyncClient(
+        base_url=URL_BASE_API, headers={"Content-Type": "application/json"}, timeout=30.0
+    )
+    try:
+        resposta_marcas = await cliente.get("/sessions/brands-by-login", params={"login": cfg["usuario"]})
+        marcas_raiz = resposta_marcas.json().get("content", [])
+        if len(marcas_raiz) != 1:
+            raise RuntimeError(f"esperava exatamente 1 marca raiz pro login HTTP, veio {len(marcas_raiz)}")
+        brand_raiz_id = marcas_raiz[0]["id"]
+
+        resposta_login = await cliente.post(
+            "/sessions",
+            params={"essential": ""},
+            json={
+                "login": cfg["usuario"],
+                "password": cfg["senha"],
+                "brand": brand_raiz_id,
+                "persistent": False,
+                "type": "DEFAULT",
+            },
+        )
+        if resposta_login.status_code >= 400:
+            raise RuntimeError(f"login via HTTP falhou: status {resposta_login.status_code}")
+        corpo_login = resposta_login.json()
+        cliente.headers["Authorization"] = corpo_login["accessToken"]
+        user_id = corpo_login["user"]["id"]
+
+        resposta_arvore = await cliente.get(f"/v2/brands/tree/{brand_raiz_id}")
+        marca_alvo = next(
+            (
+                m
+                for m in resposta_arvore.json().get("content", [])
+                if m.get("brandChildName") == NOME_MARCA_ALVO
+            ),
+            None,
+        )
+        if marca_alvo is None:
+            raise RuntimeError(f"marca '{NOME_MARCA_ALVO}' não encontrada na árvore de marcas da conta")
+
+        return ContextoHttp(cliente=cliente, brand_id=marca_alvo["brandChildId"], user_id=user_id)
+    except Exception:
+        await cliente.aclose()
+        raise
+
+
+async def _buscar_device_por_placa(contexto: ContextoHttp, placa: str, cliente_nome: str) -> dict | None:
+    """Busca o device (rastreador) + vehicle de `placa` via
+    `GET /v2/devices/detail`, filtrando pela marca certa (`contexto.
+    brand_id`) e pelo `cliente_nome` (substring, mesma normalização de
+    `_buscar_e_selecionar_veiculo` -- placas repetidas entre marcas/
+    clientes diferentes são esperadas, é uma cooperativa multimarca).
+    `None` = não encontrado (placa inválida/inexistente/contrato
+    inativo), não é erro técnico -- mesma semântica de
+    `_buscar_e_selecionar_veiculo` retornando `False`.
+
+    Devolve o dict cru do endpoint (`id`=deviceId, `vehicleId`, `brandId`,
+    `chassi`, `customerName`, ...). **Nunca usar `/v2/vehicles?
+    licensePlate=` pra isso** -- esse endpoint só devolve 1 id, e usar o
+    mesmo valor pra `deviceId`/`vehicleId` faz o incidente ficar invisível
+    pro relatório baixado depois (achado real, confirmado com 3 testes
+    reais -- ver `_handoff/investigacao_lag_relatorio_tracknme.md`).
+    """
+    resposta = await contexto.cliente.get(
+        "/v2/devices/detail",
+        params={"filter": "devices", "limit": 10, "page": 0, "status": "ACTIVE", "term": placa},
+    )
+    if resposta.status_code >= 400:
+        raise RuntimeError(f"busca de device falhou: status {resposta.status_code} (placa={placa})")
+
+    cliente_normalizado = cliente_nome.strip().lower()
+    for candidato in resposta.json().get("content", []):
+        if candidato.get("brandId") != contexto.brand_id:
+            continue
+        if cliente_normalizado in (candidato.get("customerName") or "").lower():
+            return candidato
+    return None
+
+
+async def abrir_incidente_http(contexto: ContextoHttp, placa: str, cliente: str) -> str:
+    """Equivalente HTTP de `abrir_incidente` -- mesmo contrato de retorno/
+    exceções (retorna `"Incidente aberto"`, levanta `RuntimeError` se o
+    veículo não for encontrado, `IncidenteDuplicadoError` se a API
+    rejeitar por já existir incidente aberto pro device -- confirmado ao
+    vivo, 2026-08-19: `POST .../operation/create` devolve `400` com
+    `{"message": "já existe um incidente do tipo NO_COMMUNICATION_48HS
+    aberto para esse dispositivo"}`, mensagem estável o bastante pra
+    detectar por substring)."""
+    device = await _buscar_device_por_placa(contexto, placa, cliente)
+    if device is None:
+        raise RuntimeError(f"Veículo não encontrado ou contrato inativo (placa={placa})")
+
+    payload = {
+        "brandId": contexto.brand_id,
+        "deviceId": int(device["id"]),
+        "vehicleId": int(device["vehicleId"]),
+        "userOperatorId": contexto.user_id,
+        "type": TIPO_SEM_COMUNICACAO_API,
+        "observation": "",
+        "returned": None,
+    }
+    resposta = await contexto.cliente.post("/v2/incidents/operation/create", json=payload)
+    if resposta.status_code >= 400:
+        mensagem = ""
+        try:
+            mensagem = str(resposta.json().get("message", ""))
+        except Exception:  # noqa: BLE001 - corpo pode não ser JSON válido
+            pass
+        if "já existe" in mensagem and "aberto" in mensagem:
+            raise IncidenteDuplicadoError(
+                f"Track N' Me rejeitou a criação via HTTP -- incidente já aberto (placa={placa}): {mensagem}"
+            )
+        raise RuntimeError(f"criar incidente via HTTP falhou: status {resposta.status_code} (placa={placa})")
+
+    corpo = resposta.json()
+    if not corpo.get("id"):
+        raise RuntimeError(f"criação via HTTP não devolveu id (placa={placa}): {corpo}")
+    return "Incidente aberto"
+
+
+async def _acao_abrir_incidente_http(contexto: ContextoHttp, item: tuple[str, str]) -> str:
+    placa, cliente = item
+    return await abrir_incidente_http(contexto, placa, cliente)
+
+
+async def _buscar_incidente_aberto_http(contexto: ContextoHttp, placa: str) -> str:
+    """Só usado quando `concluir_incidente_http` não recebe `numero_
+    incidente` (fallback raro -- na prática o motor de regras sempre
+    preenche `id`, igual o caminho Playwright já assume hoje). Usa
+    `GET /v2/incidents/details`, que tem uma defasagem real de propagação
+    conhecida (`_handoff/investigacao_lag_relatorio_tracknme.md`) -- não
+    confiável pra "acabou de abrir", mas incidentes mais antigos (o caso
+    normal aqui) já devem ter propagado."""
+    resposta = await contexto.cliente.get(
+        "/v2/incidents/details",
+        params={
+            "brandId": contexto.brand_id,
+            "licensePlate": placa,
+            "status": "OPEN",
+            "type": TIPO_SEM_COMUNICACAO_API,
+        },
+    )
+    if resposta.status_code >= 400:
+        raise RuntimeError(f"busca de incidente aberto falhou: status {resposta.status_code} (placa={placa})")
+
+    linhas = resposta.json().get("content", [])
+    if not linhas:
+        raise RuntimeError(f"Nenhum incidente aberto encontrado (placa={placa})")
+    if len(linhas) > 1:
+        raise MultiplosIncidentesAbertosError(
+            f"Mais de um incidente aberto pra placa={placa} -- informe numero_incidente"
+        )
+    return str(linhas[0]["id"])
+
+
+async def concluir_incidente_http(
+    contexto: ContextoHttp, placa: str, motivo: str, numero_incidente: str | None = None
+) -> str:
+    """Equivalente HTTP de `concluir_incidente`. A conclusão real da tela
+    NÃO é 1 chamada só -- é uma sequência de 4 (capturada ao vivo do
+    tráfego de rede real de uma conclusão de produção, 2026-08-19):
+    "Atribuir" -> "Alterar situação" -> "Acompanhamento" (`motivo`) ->
+    "Concluir Incidente". Repetir só o último passo conclui o incidente,
+    mas deixa `situation` vazia e sem nenhum comentário registrado --
+    testado e confirmado incompleto perto do que a tela produz. Aborta
+    com o erro do passo que falhar, sem tentar os seguintes (evita deixar
+    o incidente pela metade sem sinalizar)."""
+    numero = numero_incidente or await _buscar_incidente_aberto_http(contexto, placa)
+
+    resposta_atribuir = await contexto.cliente.post(
+        f"/v2/incidents/operation/assing/{numero}", json={"userOperatorId": contexto.user_id}
+    )
+    if resposta_atribuir.status_code >= 400:
+        raise RuntimeError(f"atribuir operador falhou: status {resposta_atribuir.status_code} (incidente={numero})")
+
+    resposta_situacao = await contexto.cliente.post(
+        f"/v2/incidents/operation/situation/{numero}", json={"situation": SITUACAO_ANALISE_SISTEMA}
+    )
+    if resposta_situacao.status_code >= 400:
+        raise RuntimeError(f"alterar situação falhou: status {resposta_situacao.status_code} (incidente={numero})")
+
+    resposta_comentario = await contexto.cliente.post(
+        f"/v2/incidents/operation/comment/{numero}",
+        json={"comment": motivo, "type": TIPO_ACOMPANHAMENTO_INFORMACAO, "createdUserId": contexto.user_id},
+    )
+    if resposta_comentario.status_code >= 400:
+        raise RuntimeError(f"registrar acompanhamento falhou: status {resposta_comentario.status_code} (incidente={numero})")
+
+    resposta_resolver = await contexto.cliente.post(
+        f"/v2/incidents/operation/resolved/{numero}", json={"data": {"loggedUser": str(contexto.user_id)}}
+    )
+    if resposta_resolver.status_code >= 400:
+        raise RuntimeError(f"concluir incidente falhou: status {resposta_resolver.status_code} (incidente={numero})")
+
+    return f"Incidente {numero} concluído"
+
+
+async def _acao_concluir_incidente_http(contexto: ContextoHttp, item: tuple[str, str, str | None]) -> str:
+    placa, motivo, numero_incidente = item
+    return await concluir_incidente_http(contexto, placa, motivo, numero_incidente=numero_incidente)

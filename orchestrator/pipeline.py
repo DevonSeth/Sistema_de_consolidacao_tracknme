@@ -318,54 +318,173 @@ def _falhas_com_descricao(resultados: list, descrever_item: Callable[[Any], str]
     ]
 
 
-def _resultado_aguardando_reconexao(
-    etapa: str, reconexao: "playwright_utils.AguardandoReconexao", chave_sucesso: str,
-    descrever_item: Callable[[Any], str] | None = None,
-) -> ResultadoEtapa:
-    """Monta o `ResultadoEtapa` de uma queda de sessão a partir de
-    `reconexao.processados` (itens que já tinham resultado antes da
-    queda) — mesmo padrão de separação sucesso/falha já usado no
-    caminho normal (`[r.resultado["linha"] for r in resultados if
-    r.sucesso]`). `descrever_item` (opcional) preenche `"descricao"` em
-    cada falha, mesmo formato usado no caminho normal (ver
-    `_descrever_linha_incidente`)."""
-    descrever = descrever_item or str
-    return ResultadoEtapa(
-        etapa,
-        sucesso=False,
-        mensagem=f"Sessão caída — aguardando reconexão manual ({len(reconexao.pendentes)} pendente(s)).",
-        dados={
-            chave_sucesso: [r.resultado["linha"] for r in reconexao.processados if r.sucesso],
-            "falhas": [
-                {"linha": r.item, "erro": r.erro, "descricao": descrever(r.item)}
-                for r in reconexao.processados if not r.sucesso
-            ],
-        },
-        aguardando_reconexao={"pendentes": reconexao.pendentes},
-    )
+async def _acao_abrir_http(contexto_http: "tracknme_bot.ContextoHttp", linha: dict) -> dict:
+    resultado = await tracknme_bot.abrir_incidente_http(contexto_http, linha["placa"], linha["cliente"])
+    return {"linha": linha, "resultado": resultado}
 
 
-def _resultado_cancelado(
-    etapa: str, cancelamento: "playwright_utils.CancelamentoSolicitado", chave_sucesso: str,
-    descrever_item: Callable[[Any], str] | None = None,
-) -> ResultadoEtapa:
-    """Mesmo padrão de `_resultado_aguardando_reconexao`, mas pra
-    cancelamento pedido pelo usuário no meio do processamento da fila —
-    nunca retomada automática, quem chama trata como parada definitiva."""
-    descrever = descrever_item or str
-    return ResultadoEtapa(
-        etapa,
-        sucesso=False,
-        mensagem=f"Cancelado pelo usuário ({len(cancelamento.pendentes)} pendente(s)).",
-        dados={
-            chave_sucesso: [r.resultado["linha"] for r in cancelamento.processados if r.sucesso],
-            "falhas": [
-                {"linha": r.item, "erro": r.erro, "descricao": descrever(r.item)}
-                for r in cancelamento.processados if not r.sucesso
-            ],
-        },
-        cancelado={"pendentes": cancelamento.pendentes},
+async def _acao_concluir_http(contexto_http: "tracknme_bot.ContextoHttp", linha: dict) -> dict:
+    resultado = await tracknme_bot.concluir_incidente_http(
+        contexto_http, linha["placa"], linha["observacao_sistema"],
+        numero_incidente=linha.get("id") or None,
     )
+    return {"linha": linha, "resultado": resultado}
+
+
+def _avaliar_circuit_breaker_tracknme_http(resultados_canario: list, parametros: dict) -> dict | None:
+    """Mesmo espírito do circuit breaker do SGA (`_avaliar_circuit_
+    breaker_sga_http`), mas só com a perna de falha técnica — "veículo
+    não encontrado" aqui já é tratado como falha de item normal
+    (`RuntimeError`, mesma semântica do caminho Playwright de hoje), não
+    é uma resposta válida separada como o "não encontrado" do SGA, então
+    não precisa de um limiar próprio.
+
+    **Achado ao vivo 2026-08-19** (teste de escala, 100 candidatos reais,
+    concorrência 100): 8% das "falhas" eram `IncidenteDuplicadoError`
+    (device já tinha incidente aberto — a API corretamente recusando,
+    0% de falha técnica de verdade). Isso É um resultado de negócio
+    esperado, não falha técnica — excluído do cálculo via `tracknme_bot.
+    eh_erro_de_negocio_esperado` (senão o circuit breaker abortaria o
+    caminho HTTP à toa sempre que a taxa natural de duplicado/ambíguo
+    passasse do limiar técnico, que é bem mais apertado)."""
+    total = len(resultados_canario)
+    if total == 0:
+        return None
+    falha_tecnica = sum(
+        1 for r in resultados_canario
+        if not r.sucesso and not tracknme_bot.eh_erro_de_negocio_esperado(r.erro)
+    )
+    taxa_falha_tecnica = falha_tecnica / total
+    limiar_falha_tecnica = float(parametros.get("tracknme_http_limiar_falha_tecnica", 0.05))
+    if taxa_falha_tecnica > limiar_falha_tecnica:
+        return {"motivo": "taxa_falha_tecnica", "taxa_falha_tecnica": taxa_falha_tecnica}
+    return None
+
+
+async def _etapa_incidente_2_estagios(
+    etapa: str,
+    itens: list[dict],
+    acao_http: Callable[["tracknme_bot.ContextoHttp", dict], Any],
+    acao_playwright: Callable[[Any, dict], Any],
+    chave_sucesso: str,
+    on_progresso: Callable[[int, int], None] | None = None,
+    cancelar_checker: Callable[[], bool] | None = None,
+    on_worker_status: Callable[[int, str], None] | None = None,
+) -> ResultadoEtapa:
+    """Achado 2026-08-19: mesmo padrão de 2 estágios já usado em `etapa_
+    enriquecimento_sga` (Estágio HTTP com canário + circuit breaker,
+    fallback Estágio Playwright), reaproveitado aqui por `etapa_abrir_
+    incidentes_automaticos`/`etapa_fechar_incidentes_automaticos`.
+    Diferente do SGA, aqui não existe uma divisão permanente de tipo por
+    item (chassi confirmado vs placa) — TODO item tenta o Estágio HTTP
+    primeiro (se o kill switch estiver ligado); a única divisão é
+    temporária (canário vs resto, decidida pelo circuit breaker). Por
+    isso `pendentes` (sempre uma lista de `linha` dicts, autocontida) já
+    basta pra `orchestrator.catalogo_etapas.retomar_etapa` reprocessar do
+    zero, sem precisar de um `alvos_override` equivalente ao do SGA.
+
+    Kill switch `tracknme_http_habilitado` (`system_parameters`, default
+    desligado) — com ele desligado, o fluxo é 100% Estágio Playwright,
+    idêntico ao existente antes desta mudança.
+    """
+    parametros = supabase_client.buscar_parametros()
+
+    on_item_iniciado = None
+    if on_worker_status is not None:
+        on_item_iniciado = lambda worker_id, linha: on_worker_status(worker_id, _descrever_linha_incidente(linha))  # noqa: E731
+
+    resultados_totais: list = []
+    http_abortado: dict | None = None
+    itens_playwright_pendentes = list(itens)
+
+    def _resultado_final(
+        sucesso: bool, mensagem: str = "",
+        aguardando_reconexao: dict | None = None, cancelado: dict | None = None,
+    ) -> ResultadoEtapa:
+        dados = {
+            chave_sucesso: [r.resultado["linha"] for r in resultados_totais if r.sucesso],
+            "falhas": [
+                {"linha": r.item, "erro": r.erro, "descricao": _descrever_linha_incidente(r.item)}
+                for r in resultados_totais if not r.sucesso
+            ],
+        }
+        if http_abortado is not None:
+            dados["tracknme_http_abortado"] = http_abortado
+        return ResultadoEtapa(
+            etapa, sucesso=sucesso, mensagem=mensagem, dados=dados,
+            aguardando_reconexao=aguardando_reconexao, cancelado=cancelado,
+        )
+
+    if bool(parametros.get("tracknme_http_habilitado", False)):
+        tamanho_canario = min(int(parametros.get("tracknme_http_tamanho_canario", 20)), len(itens))
+        canario, resto = itens[:tamanho_canario], itens[tamanho_canario:]
+        concorrencia = int(parametros.get("tracknme_http_concorrencia", 10))
+        fase_http_atual = "canario"
+        itens_playwright_pendentes = []
+
+        try:
+            contexto_http = await tracknme_bot.preparar_contexto_http()
+            try:
+                resultados_canario = await playwright_utils.processar_fila_http(
+                    contexto_http, canario, acao_http, concorrencia=concorrencia,
+                    on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                    on_item_iniciado=on_item_iniciado,
+                )
+                resultados_totais.extend(resultados_canario)
+
+                http_abortado = _avaliar_circuit_breaker_tracknme_http(resultados_canario, parametros)
+                if http_abortado is not None:
+                    itens_playwright_pendentes = resto
+                elif resto:
+                    fase_http_atual = "resto"
+                    resultados_resto = await playwright_utils.processar_fila_http(
+                        contexto_http, resto, acao_http, concorrencia=concorrencia,
+                        on_progresso=on_progresso, cancelar_checker=cancelar_checker,
+                        on_item_iniciado=on_item_iniciado,
+                    )
+                    resultados_totais.extend(resultados_resto)
+            finally:
+                await contexto_http.cliente.aclose()
+        except playwright_utils.AguardandoReconexao as e:
+            resultados_totais.extend(e.processados)
+            pendentes = list(e.pendentes) + (resto if fase_http_atual == "canario" else [])
+            return _resultado_final(
+                False, f"Sessão caída — aguardando reconexão manual ({len(pendentes)} pendente(s)).",
+                aguardando_reconexao={"pendentes": pendentes},
+            )
+        except playwright_utils.CancelamentoSolicitado as e:
+            resultados_totais.extend(e.processados)
+            pendentes = list(e.pendentes) + (resto if fase_http_atual == "canario" else [])
+            return _resultado_final(
+                False, f"Cancelado pelo usuário ({len(pendentes)} pendente(s)).",
+                cancelado={"pendentes": pendentes},
+            )
+        except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
+            return ResultadoEtapa(etapa, sucesso=False, mensagem=str(e))
+
+    if itens_playwright_pendentes:
+        resultados_pw, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
+            itens_playwright_pendentes, acao_playwright, on_progresso=on_progresso,
+            cancelar_checker=cancelar_checker, descrever_item=_descrever_linha_incidente,
+            on_worker_status=on_worker_status,
+        )
+        if reconexao is not None:
+            resultados_totais.extend(reconexao.processados)
+            return _resultado_final(
+                False, f"Sessão caída — aguardando reconexão manual ({len(reconexao.pendentes)} pendente(s)).",
+                aguardando_reconexao={"pendentes": list(reconexao.pendentes)},
+            )
+        if cancelamento is not None:
+            resultados_totais.extend(cancelamento.processados)
+            return _resultado_final(
+                False, f"Cancelado pelo usuário ({len(cancelamento.pendentes)} pendente(s)).",
+                cancelado={"pendentes": list(cancelamento.pendentes)},
+            )
+        if erro is not None:
+            return ResultadoEtapa(etapa, sucesso=False, mensagem=erro)
+        resultados_totais.extend(resultados_pw)
+
+    return _resultado_final(True)
 
 
 async def etapa_abrir_incidentes_automaticos(
@@ -378,11 +497,19 @@ async def etapa_abrir_incidentes_automaticos(
     `grupo_1_abrir`). Se `None` (rodando isolada no painel), chama
     `etapa_motor_de_regras()` direto — `grupo_1_abrir` é efêmero, não
     existe planilha/disco pra reler como nas fases anteriores.
+
+    **2 ESTÁGIOS, achado 2026-08-19** (mesmo padrão do SGA, ver
+    `_etapa_incidente_2_estagios`): Estágio HTTP (`tracknme_bot.
+    abrir_incidente_http`, kill switch `tracknme_http_habilitado`) com
+    canário + circuit breaker, fallback Estágio Playwright (`tracknme_bot.
+    abrir_incidente`, como já era antes desta mudança). Com o kill switch
+    desligado (default), o fluxo é 100% Estágio Playwright, idêntico ao
+    existente antes desta mudança.
+
     `on_progresso`/`cancelar_checker` (opcionais) repassam pro
-    `processar_fila` subjacente — ver
-    `integrations.playwright_utils.processar_fila`. `on_worker_status`
+    `processar_fila`/`processar_fila_http` subjacente. `on_worker_status`
     (opcional) reporta o que cada worker está processando agora
-    (`"Placa X — Cliente Y"`), ver `_processar_fila_com_navegador`."""
+    (`"Placa X — Cliente Y"`)."""
     if dados is None:
         resultado_motor = etapa_motor_de_regras()
         if not resultado_motor.sucesso:
@@ -391,31 +518,9 @@ async def etapa_abrir_incidentes_automaticos(
             )
         dados = resultado_motor.dados
 
-    resultados, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
-        dados["grupo_1_abrir"], _acao_abrir, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-        descrever_item=_descrever_linha_incidente, on_worker_status=on_worker_status,
-    )
-    if reconexao is not None:
-        return _resultado_aguardando_reconexao(
-            "abrir_incidentes_automaticos", reconexao, "abertos", _descrever_linha_incidente
-        )
-    if cancelamento is not None:
-        return _resultado_cancelado(
-            "abrir_incidentes_automaticos", cancelamento, "abertos", _descrever_linha_incidente
-        )
-    if erro is not None:
-        return ResultadoEtapa("abrir_incidentes_automaticos", sucesso=False, mensagem=erro)
-
-    return ResultadoEtapa(
-        "abrir_incidentes_automaticos",
-        sucesso=True,
-        dados={
-            "abertos": [r.resultado["linha"] for r in resultados if r.sucesso],
-            "falhas": [
-                {"linha": r.item, "erro": r.erro, "descricao": _descrever_linha_incidente(r.item)}
-                for r in resultados if not r.sucesso
-            ],
-        },
+    return await _etapa_incidente_2_estagios(
+        "abrir_incidentes_automaticos", dados["grupo_1_abrir"], _acao_abrir_http, _acao_abrir, "abertos",
+        on_progresso=on_progresso, cancelar_checker=cancelar_checker, on_worker_status=on_worker_status,
     )
 
 
@@ -430,14 +535,23 @@ async def etapa_fechar_incidentes_automaticos(
     isolada), chama `etapa_consolidar_com_sga()` direto — mesma lógica de
     default das outras etapas efêmeras.
 
-    `motivo` de `concluir_incidente` = `observacao_sistema` da linha;
-    `numero_incidente` = `id` da linha (confirmado que é o mesmo número
-    que a tela Operador busca) — evita ambiguidade quando a placa tem
-    mais de um incidente aberto. `IncidenteDuplicadoError`/
-    `MultiplosIncidentesAbertosError` não têm tratamento diferenciado
-    (decisão do usuário) — seguem o retry padrão de `processar_fila`
-    igual qualquer outra falha de item. `on_progresso`/`cancelar_checker`
-    (opcionais) repassam pro `processar_fila` subjacente. `on_worker_status`
+    `motivo` de `concluir_incidente`/`concluir_incidente_http` =
+    `observacao_sistema` da linha; `numero_incidente` = `id` da linha
+    (confirmado que é o mesmo número que a tela Operador busca) — evita
+    ambiguidade quando a placa tem mais de um incidente aberto.
+    `IncidenteDuplicadoError`/`MultiplosIncidentesAbertosError` não têm
+    tratamento diferenciado (decisão do usuário) — seguem o retry padrão
+    igual qualquer outra falha de item.
+
+    **2 ESTÁGIOS, achado 2026-08-19** — mesmo padrão de `etapa_abrir_
+    incidentes_automaticos`/`_etapa_incidente_2_estagios`, usando
+    `tracknme_bot.concluir_incidente_http`/`concluir_incidente`. Achado
+    importante sobre `concluir_incidente_http`: a conclusão real não é 1
+    chamada só, é uma sequência de 4 (Atribuir -> Alterar situação ->
+    Acompanhamento -> Concluir) — ver docstring da função.
+
+    `on_progresso`/`cancelar_checker` (opcionais) repassam pro
+    `processar_fila`/`processar_fila_http` subjacente. `on_worker_status`
     (opcional) reporta o que cada worker está processando agora.
     """
     if dados is None:
@@ -448,31 +562,9 @@ async def etapa_fechar_incidentes_automaticos(
             )
         dados = resultado_consolidacao.dados
 
-    resultados, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
-        dados["grupo_2_concluir"], _acao_concluir, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-        descrever_item=_descrever_linha_incidente, on_worker_status=on_worker_status,
-    )
-    if reconexao is not None:
-        return _resultado_aguardando_reconexao(
-            "fechar_incidentes_automaticos", reconexao, "concluidos", _descrever_linha_incidente
-        )
-    if cancelamento is not None:
-        return _resultado_cancelado(
-            "fechar_incidentes_automaticos", cancelamento, "concluidos", _descrever_linha_incidente
-        )
-    if erro is not None:
-        return ResultadoEtapa("fechar_incidentes_automaticos", sucesso=False, mensagem=erro)
-
-    return ResultadoEtapa(
-        "fechar_incidentes_automaticos",
-        sucesso=True,
-        dados={
-            "concluidos": [r.resultado["linha"] for r in resultados if r.sucesso],
-            "falhas": [
-                {"linha": r.item, "erro": r.erro, "descricao": _descrever_linha_incidente(r.item)}
-                for r in resultados if not r.sucesso
-            ],
-        },
+    return await _etapa_incidente_2_estagios(
+        "fechar_incidentes_automaticos", dados["grupo_2_concluir"], _acao_concluir_http, _acao_concluir, "concluidos",
+        on_progresso=on_progresso, cancelar_checker=cancelar_checker, on_worker_status=on_worker_status,
     )
 
 

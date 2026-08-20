@@ -151,6 +151,33 @@ export const META: Record<string, MetaParametro> = {
     sufixo: "proporção 0-1",
     aviso: "Baseline real medido: ~0%.",
   },
+  tracknme_http_habilitado: {
+    label: "Abrir/concluir incidente via HTTP (sem navegador)",
+    categoria: "desempenho",
+    tipo: "bool",
+  },
+  tracknme_http_concorrencia: {
+    label: "Concorrência HTTP no Track N'Me (workers)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "escritas simultâneas",
+    aviso:
+      "Ainda sem rodada de escalada de concorrência validada (diferente do SGA) — cada item aqui é uma escrita real (abre/conclui incidente de verdade). Ajuste aos poucos e observe o resultado de cada rodada.",
+  },
+  tracknme_http_tamanho_canario: {
+    label: "Tamanho do lote canário (HTTP)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "incidentes",
+    aviso: "Menor que o do SGA de propósito — cada item aqui é uma escrita real, um canário menor limita o efeito de um erro em produção.",
+  },
+  tracknme_http_limiar_falha_tecnica: {
+    label: "Limiar de falha técnica do circuit breaker (Track N'Me)",
+    categoria: "desempenho",
+    tipo: "numero",
+    sufixo: "proporção 0-1",
+    aviso: "Ainda sem baseline real medido em escala — valor inicial igual ao do SGA.",
+  },
 };
 
 export const META_DEFAULT: MetaParametro = {
