@@ -771,6 +771,13 @@ function inicializarAppAutenticado() {
 
   document.getElementById("btn-ir-tratativas").addEventListener("click", () => api().abrir_tratativas());
 
+  document.getElementById("btn-abrir-log").addEventListener("click", async () => {
+    const resultado = await api().abrir_log_execucoes();
+    if (!resultado.aberto) {
+      alert("Nenhum log registrado ainda — só grava quando uma etapa tem erro ou falha por item.");
+    }
+  });
+
   document.getElementById("btn-continuar").addEventListener("click", () => api().continuar_apos_reconexao_manual());
 
   carregarEtapas();

@@ -33,6 +33,7 @@ thread e a thread da UI só através de `_estado.lock`.
 
 import asyncio
 import json
+import os
 import sys
 import threading
 import webbrowser
@@ -338,6 +339,18 @@ class Api:
         padrão do sistema — botão "Ir para tratativas" do menu lateral."""
         planilha_id = manager.carregar_config()["google_sheets"]["planilha_operacional_id"]
         webbrowser.open(f"https://docs.google.com/spreadsheets/d/{planilha_id}/edit#gid={GID_TRATATIVAS}")
+        return _para_json_seguro({"aberto": True})
+
+    def abrir_log_execucoes(self) -> dict:
+        """Abre o log local de execuções (erros/falhas por item, ver
+        `catalogo_etapas._registrar_log_arquivo`) no app padrão do Windows
+        pra `.log` — botão "Abrir log de execução" do menu lateral.
+        Devolve `aberto=False` sem lançar se nenhuma etapa nunca falhou
+        ainda (arquivo não existe)."""
+        caminho = catalogo_etapas.caminho_log_execucoes()
+        if not caminho.exists():
+            return _para_json_seguro({"aberto": False})
+        os.startfile(caminho)
         return _para_json_seguro({"aberto": True})
 
     def obter_progresso_atual(self) -> dict:

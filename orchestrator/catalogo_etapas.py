@@ -25,8 +25,10 @@ import sys
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable
 
+from config import manager
 from integrations import supabase_client
 from orchestrator import pipeline
 
@@ -189,11 +191,15 @@ def _motivo_do_resultado(resultado) -> str | None:
 
 
 def _registrar_execucao_segura(execucao_id: str, etapa_id: str, iniciado_em: datetime, finalizado_em: datetime, resultado) -> None:
-    """Grava a duração da etapa em `log_execucoes` — Observabilidade,
-    fatia 1. Envolvido em try/except de propósito: uma falha de rede ao
-    gravar telemetria nunca pode derrubar a etapa real nem, pior, vazar a
-    trava de execução (se a exceção subisse, `executar_cadeia` pularia a
-    linha de `liberar_execucao_lock()`)."""
+    """Grava a duração da etapa em `log_execucoes` (Supabase) —
+    Observabilidade, fatia 1 — e a mensagem/falhas por item num log local
+    em arquivo (fatia 2, achado 2026-08-20: listas grandes de erro
+    esperado, ex: "incidente já aberto" repetido, sumiam da tela depois
+    de fechar o Painel, sem jeito de consultar depois). Envolvido em
+    try/except de propósito: uma falha de rede/disco nunca pode derrubar
+    a etapa real nem, pior, vazar a trava de execução (se a exceção
+    subisse, `executar_cadeia` pularia a linha de
+    `liberar_execucao_lock()`)."""
     try:
         supabase_client.registrar_log_execucao(
             execucao_id=execucao_id,
@@ -207,6 +213,49 @@ def _registrar_execucao_segura(execucao_id: str, etapa_id: str, iniciado_em: dat
         )
     except Exception as exc:  # noqa: BLE001 - telemetria nunca pode derrubar a etapa real
         print(f"[observabilidade] falha ao registrar log_execucoes ({etapa_id}): {exc}", file=sys.stderr)
+    _registrar_log_arquivo(execucao_id, etapa_id, finalizado_em, resultado)
+
+
+def _diretorio_logs() -> Path:
+    """Mesma convenção de `orchestrator.pipeline._diretorio_downloads`:
+    pasta `logs/` ao lado do código em dev; `%LOCALAPPDATA%\\
+    ConsolidacaoTrackNMe\\logs` quando empacotado."""
+    if getattr(sys, "frozen", False):
+        base = manager._diretorio_dados_local()
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "logs"
+
+
+def caminho_log_execucoes() -> Path:
+    return _diretorio_logs() / "execucoes.log"
+
+
+def _registrar_log_arquivo(execucao_id: str, etapa_id: str, finalizado_em: datetime, resultado) -> None:
+    """Log em texto plano pro operador consultar erros grandes (ex:
+    duplicados do Track N'Me) sem precisar rodar de novo — complementa
+    `log_execucoes` (Supabase), que não guarda a lista de falhas por item.
+    Só grava quando há algo relevante (falha geral ou item com erro), pra
+    não poluir o arquivo com execuções 100% limpas. Nunca derruba a etapa
+    real (mesmo espírito de `_registrar_execucao_segura`)."""
+    try:
+        falhas = (resultado.dados or {}).get("falhas") or []
+        if resultado.sucesso and not falhas:
+            return
+        caminho = caminho_log_execucoes()
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        linhas = [
+            f"=== {finalizado_em.isoformat()} | execucao={execucao_id} | etapa={etapa_id} | sucesso={resultado.sucesso} ===",
+        ]
+        if resultado.mensagem:
+            linhas.append(resultado.mensagem)
+        for falha in falhas:
+            descricao = falha.get("descricao") or falha.get("linha") or falha.get("chassi") or "Item"
+            linhas.append(f"  {descricao} — {falha.get('erro', 'erro desconhecido')}")
+        with open(caminho, "a", encoding="utf-8") as arquivo:
+            arquivo.write("\n".join(linhas) + "\n\n")
+    except Exception as exc:  # noqa: BLE001 - log em arquivo nunca pode derrubar a etapa real
+        print(f"[observabilidade] falha ao gravar log em arquivo ({etapa_id}): {exc}", file=sys.stderr)
 
 
 def _kwargs_com_progresso(

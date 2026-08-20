@@ -7,7 +7,7 @@ from orchestrator import pipeline
 
 
 @pytest.fixture(autouse=True)
-def _sem_log_execucoes_real(monkeypatch):
+def _sem_log_execucoes_real(monkeypatch, tmp_path):
     """Toda chamada real ao Supabase precisa estar mockada em teste
     unitário (mesmo princípio já usado pra `adquirir_execucao_lock`/
     `liberar_execucao_lock`) — sem isso, qualquer teste que rode uma
@@ -15,8 +15,14 @@ def _sem_log_execucoes_real(monkeypatch):
     produção. Autouse: cobre todo teste do arquivo, mesmo os que não
     mencionam isso explicitamente. Testes que querem inspecionar o que
     foi gravado sobrescrevem com seu próprio `monkeypatch.setattr` no
-    corpo do teste."""
+    corpo do teste.
+
+    `_diretorio_logs` também aponta pra uma pasta temporária por padrão
+    (mesmo motivo): sem isso, todo teste que passa por
+    `_registrar_execucao_segura` escreveria em `logs/execucoes.log` de
+    verdade, na pasta do projeto."""
     monkeypatch.setattr(cat.supabase_client, "registrar_log_execucao", lambda **kwargs: None)
+    monkeypatch.setattr(cat, "_diretorio_logs", lambda: tmp_path)
 
 
 def _resultado(etapa, sucesso=True, dados=None, mensagem="", aguardando_reconexao=None, cancelado=None):
@@ -639,6 +645,72 @@ async def test_falha_ao_registrar_log_execucao_nao_derruba_etapa_nem_impede_libe
     assert execucao.motivo_parada is None
     assert execucao.resultados[0].sucesso is True
     assert liberou == [True]
+
+
+# --- Log local em arquivo (achado 2026-08-20: listas grandes de erro) -------
+
+def test_caminho_log_execucoes_usa_diretorio_logs():
+    assert cat.caminho_log_execucoes() == cat._diretorio_logs() / "execucoes.log"
+
+
+@pytest.mark.asyncio
+async def test_registrar_log_arquivo_nao_grava_quando_sucesso_sem_falhas(monkeypatch, tmp_path):
+    async def _etapa_a():
+        return _resultado("a", sucesso=True, dados={})
+
+    monkeypatch.setattr(pipeline, "etapa_fake_a", _etapa_a, raising=False)
+
+    await cat.executar_etapas_com_contexto([_etapa_fake("a", "etapa_fake_a")], {})
+
+    assert not (tmp_path / "execucoes.log").exists()
+
+
+@pytest.mark.asyncio
+async def test_registrar_log_arquivo_grava_falhas_por_item(monkeypatch, tmp_path):
+    async def _etapa_a():
+        return _resultado(
+            "abrir_incidentes_automaticos", sucesso=True,
+            dados={"falhas": [{"descricao": "Placa OYX9B42", "erro": "incidente já aberto"}]},
+        )
+
+    monkeypatch.setattr(pipeline, "etapa_fake_a", _etapa_a, raising=False)
+
+    await cat.executar_etapas_com_contexto([_etapa_fake("abrir_incidentes_automaticos", "etapa_fake_a")], {})
+
+    conteudo = (tmp_path / "execucoes.log").read_text(encoding="utf-8")
+    assert "etapa=abrir_incidentes_automaticos" in conteudo
+    assert "Placa OYX9B42 — incidente já aberto" in conteudo
+
+
+@pytest.mark.asyncio
+async def test_registrar_log_arquivo_grava_mensagem_de_falha_geral(monkeypatch, tmp_path):
+    async def _etapa_a():
+        return _resultado("publicar_fila_operacional", sucesso=False, mensagem="date/time field value out of range")
+
+    monkeypatch.setattr(pipeline, "etapa_fake_a", _etapa_a, raising=False)
+
+    await cat.executar_etapas_com_contexto([_etapa_fake("publicar_fila_operacional", "etapa_fake_a")], {})
+
+    conteudo = (tmp_path / "execucoes.log").read_text(encoding="utf-8")
+    assert "sucesso=False" in conteudo
+    assert "date/time field value out of range" in conteudo
+
+
+@pytest.mark.asyncio
+async def test_registrar_log_arquivo_falha_de_disco_nao_derruba_etapa(monkeypatch, tmp_path):
+    def _diretorio_com_erro():
+        raise OSError("disco cheio")
+
+    monkeypatch.setattr(cat, "_diretorio_logs", _diretorio_com_erro)
+
+    async def _etapa_a():
+        return _resultado("a", sucesso=False, mensagem="deu ruim")
+
+    monkeypatch.setattr(pipeline, "etapa_fake_a", _etapa_a, raising=False)
+
+    execucao = await cat.executar_etapas_com_contexto([_etapa_fake("a", "etapa_fake_a")], {})
+
+    assert execucao.resultados[0].sucesso is False  # a etapa em si não é afetada pela falha do log
 
 
 @pytest.mark.asyncio
