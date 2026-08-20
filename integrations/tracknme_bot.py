@@ -592,7 +592,9 @@ class MultiplosIncidentesAbertosError(RuntimeError):
     (`input[name="number"]`) pra esse caso (Sessão 5 de captura)."""
 
 
-_MARCADORES_ERRO_NEGOCIO_ESPERADO = ("incidente já aberto", "Mais de um incidente aberto")
+_MARCADORES_ERRO_NEGOCIO_ESPERADO = (
+    "incidente já aberto", "Mais de um incidente aberto", "incidente já está",
+)
 
 
 def eh_erro_de_negocio_esperado(mensagem: str | None) -> bool:
@@ -605,7 +607,14 @@ def eh_erro_de_negocio_esperado(mensagem: str | None) -> bool:
     (não de instabilidade técnica) -- um circuit breaker que conta isso
     junto com falha técnica de verdade abortaria o caminho HTTP à toa.
     Usado por `orchestrator.pipeline._avaliar_circuit_breaker_tracknme_
-    http` pra não contar esses casos no limiar."""
+    http` pra não contar esses casos no limiar.
+
+    Marcador `"incidente já está"` (achado 2026-08-19, sessão de validação
+    de `concluir_incidente_http` com candidato real): tentar concluir um
+    incidente já resolvido devolve `400` com `{"message": "incidente já
+    está RESOLVED"}` no passo "Atribuir" -- mesma natureza de negócio
+    esperado que duplicado (cenário real: item concluído por um humano
+    entre o snapshot e a execução automática)."""
     if not mensagem:
         return False
     return any(marcador in mensagem for marcador in _MARCADORES_ERRO_NEGOCIO_ESPERADO)
@@ -945,6 +954,19 @@ async def _buscar_incidente_aberto_http(contexto: ContextoHttp, placa: str) -> s
     return str(linhas[0]["id"])
 
 
+def _mensagem_erro(resposta: httpx.Response) -> str:
+    """Extrai `message` do corpo de erro da API, se houver -- mesmo padrão
+    já usado por `abrir_incidente_http` pra distinguir duplicado. Usado
+    pelos 4 passos de `concluir_incidente_http` (achado 2026-08-19: um
+    incidente já resolvido devolve `400`/`"incidente já está RESOLVED"`
+    no passo "Atribuir", detectável por `eh_erro_de_negocio_esperado`
+    só se a mensagem da API estiver na exceção levantada)."""
+    try:
+        return str(resposta.json().get("message", ""))
+    except Exception:  # noqa: BLE001 - corpo pode não ser JSON válido
+        return ""
+
+
 async def concluir_incidente_http(
     contexto: ContextoHttp, placa: str, motivo: str, numero_incidente: str | None = None
 ) -> str:
@@ -963,26 +985,38 @@ async def concluir_incidente_http(
         f"/v2/incidents/operation/assing/{numero}", json={"userOperatorId": contexto.user_id}
     )
     if resposta_atribuir.status_code >= 400:
-        raise RuntimeError(f"atribuir operador falhou: status {resposta_atribuir.status_code} (incidente={numero})")
+        raise RuntimeError(
+            f"atribuir operador falhou: status {resposta_atribuir.status_code} "
+            f"(incidente={numero}): {_mensagem_erro(resposta_atribuir)}"
+        )
 
     resposta_situacao = await contexto.cliente.post(
         f"/v2/incidents/operation/situation/{numero}", json={"situation": SITUACAO_ANALISE_SISTEMA}
     )
     if resposta_situacao.status_code >= 400:
-        raise RuntimeError(f"alterar situação falhou: status {resposta_situacao.status_code} (incidente={numero})")
+        raise RuntimeError(
+            f"alterar situação falhou: status {resposta_situacao.status_code} "
+            f"(incidente={numero}): {_mensagem_erro(resposta_situacao)}"
+        )
 
     resposta_comentario = await contexto.cliente.post(
         f"/v2/incidents/operation/comment/{numero}",
         json={"comment": motivo, "type": TIPO_ACOMPANHAMENTO_INFORMACAO, "createdUserId": contexto.user_id},
     )
     if resposta_comentario.status_code >= 400:
-        raise RuntimeError(f"registrar acompanhamento falhou: status {resposta_comentario.status_code} (incidente={numero})")
+        raise RuntimeError(
+            f"registrar acompanhamento falhou: status {resposta_comentario.status_code} "
+            f"(incidente={numero}): {_mensagem_erro(resposta_comentario)}"
+        )
 
     resposta_resolver = await contexto.cliente.post(
         f"/v2/incidents/operation/resolved/{numero}", json={"data": {"loggedUser": str(contexto.user_id)}}
     )
     if resposta_resolver.status_code >= 400:
-        raise RuntimeError(f"concluir incidente falhou: status {resposta_resolver.status_code} (incidente={numero})")
+        raise RuntimeError(
+            f"concluir incidente falhou: status {resposta_resolver.status_code} "
+            f"(incidente={numero}): {_mensagem_erro(resposta_resolver)}"
+        )
 
     return f"Incidente {numero} concluído"
 

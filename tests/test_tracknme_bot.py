@@ -311,6 +311,11 @@ class TestEhErroDeNegocioEsperado:
         assert not bot.eh_erro_de_negocio_esperado(None)
         assert not bot.eh_erro_de_negocio_esperado("")
 
+    def test_incidente_ja_resolvido_e_esperado(self):
+        assert bot.eh_erro_de_negocio_esperado(
+            "atribuir operador falhou: status 400 (incidente=42): incidente já está RESOLVED"
+        )
+
 
 class TestConcluirIncidenteHttp:
     """Achado 2026-08-19 -- a conclusão real da tela é uma sequência de 4
@@ -356,6 +361,21 @@ class TestConcluirIncidenteHttp:
         with pytest.raises(RuntimeError):
             await bot.concluir_incidente_http(contexto, "ABC1234", "motivo", numero_incidente="42")
         assert len(cliente_fake.chamadas_post) == 1
+
+    @pytest.mark.asyncio
+    async def test_falha_no_atribuir_por_ja_resolvido_e_reconhecivel_como_negocio_esperado(self):
+        cliente_fake = _ClienteHttpxFake(
+            respostas_post=[
+                _RespostaHttpxFake(status_code=400, corpo={"message": "incidente já está RESOLVED", "code": 400})
+            ]
+        )
+        contexto = _contexto_http_fake(cliente_fake)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await bot.concluir_incidente_http(contexto, "ABC1234", "motivo", numero_incidente="42")
+
+        assert "incidente já está RESOLVED" in str(excinfo.value)
+        assert bot.eh_erro_de_negocio_esperado(str(excinfo.value))
 
     @pytest.mark.asyncio
     async def test_falha_na_situacao_nao_tenta_os_proximos_passos(self):
