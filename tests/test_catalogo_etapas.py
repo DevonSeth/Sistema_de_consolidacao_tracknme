@@ -32,8 +32,8 @@ def _etapa_fake(id_, nome_funcao, **kwargs):
 
 # --- estrutura do catálogo ---------------------------------------------------
 
-def test_catalogo_tem_13_etapas_ids_unicos_e_so_enriquecimento_sga_e_manual():
-    assert len(cat.CATALOGO) == 13
+def test_catalogo_tem_14_etapas_ids_unicos_e_so_enriquecimento_sga_e_manual():
+    assert len(cat.CATALOGO) == 14
     ids = [etapa.id for etapa in cat.CATALOGO]
     assert len(ids) == len(set(ids))
     assert [etapa.id for etapa in cat.CATALOGO if etapa.manual] == ["enriquecimento_sga"]

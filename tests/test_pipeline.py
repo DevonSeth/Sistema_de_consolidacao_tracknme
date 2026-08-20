@@ -2311,6 +2311,104 @@ async def test_etapa_publicar_fila_operacional_discrepancia_revisada_nao_afeta_o
     assert len(linhas_escritas) == 1
 
 
+def test_data_referencia_iso_converte_dia_maior_que_12():
+    """Achado 2026-08-20: `data_incidente`/`data_contrato` "DD/MM/AAAA
+    HH:MM:SS" cru quebrava o upsert no Postgres quando o dia era >12 (não
+    existe mês 20) — "20/08/2026 00:30:33" é o valor real que causou o
+    erro `date/time field value out of range` na Fase E ao vivo."""
+    assert orch._data_referencia_iso({"data_incidente": "20/08/2026 00:30:33"}) == "2026-08-20T00:30:33"
+
+
+def test_data_referencia_iso_sem_hora():
+    assert orch._data_referencia_iso({"data_contrato": "01/08/2026"}) == "2026-08-01T00:00:00"
+
+
+def test_data_referencia_iso_ilegivel_ou_vazia_vira_none():
+    assert orch._data_referencia_iso({"data_incidente": "não sei"}) is None
+    assert orch._data_referencia_iso({"data_incidente": ""}) is None
+    assert orch._data_referencia_iso({}) is None
+
+
+def test_formatar_data_referencia_para_exibicao_com_hora():
+    assert orch._formatar_data_referencia_para_exibicao("2026-08-20T00:30:33") == "20/08/2026 00:30:33"
+
+
+def test_formatar_data_referencia_para_exibicao_meia_noite_vira_so_data():
+    assert orch._formatar_data_referencia_para_exibicao("2026-08-01T00:00:00") == "01/08/2026"
+
+
+def test_formatar_data_referencia_para_exibicao_vazia_ou_none():
+    assert orch._formatar_data_referencia_para_exibicao("") == ""
+    assert orch._formatar_data_referencia_para_exibicao(None) == ""
+
+
+def test_formatar_data_referencia_para_exibicao_valor_legado_nao_iso_passa_direto():
+    """Dado histórico gravado antes deste fix (formato BR cru, não ISO) —
+    `fromisoformat` falha, cai no fallback que devolve o valor como veio
+    em vez de estourar, pra não quebrar exibição de linhas antigas."""
+    assert orch._formatar_data_referencia_para_exibicao("01/08/2026") == "01/08/2026"
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_upserta_data_referencia_com_dia_maior_que_12(monkeypatch):
+    """Regressão de ponta a ponta do erro real de produção (2026-08-20):
+    uma linha com `data_incidente` de dia>12 precisa upsertar com sucesso
+    (não propagar a exceção do Postgres) e o payload capturado precisa
+    carregar a data já em ISO."""
+    linha = _linha_manutencao(data_incidente="20/08/2026 00:30:33")
+    _reescritas, upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+
+    resultado = await orch.etapa_publicar_fila_operacional([linha])
+
+    assert resultado.sucesso is True
+    assert upserts[0]["data_referencia"] == "2026-08-20T00:30:33"
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_aba_tratativas_mantem_data_em_formato_br(monkeypatch):
+    """Guarda de não-regressão: a aba "Tratativas" recalcula a data direto
+    do dado fresco desta execução (`_data_referencia`, não passa pelos
+    helpers de conversão pro Supabase) — precisa continuar mostrando o
+    formato brasileiro original pro atendente, mesmo com o fix acima."""
+    linha = _linha_manutencao(data_incidente="20/08/2026 00:30:33")
+    reescritas, _upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+
+    resultado = await orch.etapa_publicar_fila_operacional([linha])
+
+    assert resultado.sucesso is True
+    _, _, linhas_escritas = reescritas[0]
+    assert linhas_escritas[0]["Data Contrato / Data Incidente"] == "20/08/2026 00:30:33"
+
+
+# --- etapa_sincronizar_atendente_tratativas (achado 2026-08-20: "Fase F ----
+# sozinha" não via marcação nova do atendente sem reprocessar Fase E) -------
+
+def test_etapa_sincronizar_atendente_tratativas_sucesso(monkeypatch):
+    sheet_atual = [_linha_atendente_sheet("chave-1", Selecionado=True, **{"Atendimento": "Base", "Base": "Base Teste"})]
+    _reescritas, _upserts, syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, sheet_atual)
+
+    resultado = orch.etapa_sincronizar_atendente_tratativas(agora=datetime(2026, 8, 20, 9, 0, 0))
+
+    assert resultado.sucesso is True
+    assert resultado.dados == {"sincronizadas": 1}
+    assert syncs == [("chave-1", {
+        "selecionado": True, "tecnico": "", "situacao_manual": "", "observacao_manual": "",
+        "discrepancia_revisada": False, "atendimento": "base", "base_id": "base-uuid-1", "ponto_acao_id": None,
+    })]
+
+
+def test_etapa_sincronizar_atendente_tratativas_falha_ao_ler_aba(monkeypatch):
+    def _ler_aba_explode(planilha, aba):
+        raise RuntimeError("Google Sheets indisponível")
+
+    monkeypatch.setattr(orch.google_sheets_client, "ler_aba", _ler_aba_explode)
+
+    resultado = orch.etapa_sincronizar_atendente_tratativas()
+
+    assert resultado.sucesso is False
+    assert "Google Sheets indisponível" in resultado.mensagem
+
+
 # --- situacao_manual_definida_em (widget "Situação Manual parada", Fase 4) --
 
 @pytest.mark.asyncio
@@ -2881,6 +2979,21 @@ def test_etapa_escalonar_ligacao_marca_e_escreve_linha_nova(monkeypatch):
     assert escrita["Conseguiu Agendar?"] == ""
 
 
+def test_etapa_escalonar_ligacao_reformata_data_referencia_iso_para_br(monkeypatch):
+    """Achado 2026-08-20: `data_referencia` agora é gravada em ISO no
+    Supabase (fix do erro de dia>12 na Fase E) — "Pendente de Ligação" lê
+    de volta do Supabase, então precisa reformatar pro padrão brasileiro
+    que o atendente já está acostumado a ver."""
+    candidata = _tratativa_candidata(data_referencia="2026-08-20T00:30:33")
+    _marcadas, reescritas = _preparar_mocks_escalonar(monkeypatch, [candidata])
+
+    resultado = orch.etapa_escalonar_ligacao()
+
+    assert resultado.sucesso is True
+    _, _aba, linhas_escritas = reescritas[0]
+    assert linhas_escritas[0]["Data Contrato / Data Incidente"] == "20/08/2026 00:30:33"
+
+
 def test_etapa_escalonar_ligacao_reporta_progresso_por_item(monkeypatch):
     candidatas = [
         _tratativa_candidata(id="tratativa-uuid-1", chave_unica="chave-hash-1"),
@@ -3432,6 +3545,22 @@ def test_etapa_processar_resultado_ligacao_linha_nova_puma_nasce_zero_dias(monke
     assert resultado.sucesso is True
     linhas_puma = _reescrita_de(mocks, "Encaminhar pra Puma")
     assert linhas_puma[0]["Dias sem contato"] == "0 dias sem contato"
+
+
+def test_etapa_processar_resultado_ligacao_reformata_data_referencia_iso_para_br(monkeypatch):
+    """Mesmo achado de `test_etapa_escalonar_ligacao_reformata_data_referencia_iso_para_br`,
+    pro caminho "Encaminhar pra Puma" (Fase F.5)."""
+    tratativa = _tratativa_puma(status="aguardando_ligacao", data_referencia="2026-08-01T00:00:00")
+    linha = _linha_pendente_ligacao_sheet("chave-hash-9", **{"Retornou?": "Não", "Data Contato": "07/08/2026"})
+    mocks = _preparar_mocks_processar_ligacao(
+        monkeypatch, [linha], tratativas_por_chave={"chave-hash-9": tratativa}
+    )
+
+    resultado = orch.etapa_processar_resultado_ligacao()
+
+    assert resultado.sucesso is True
+    linhas_puma = _reescrita_de(mocks, "Encaminhar pra Puma")
+    assert linhas_puma[0]["Data Contrato / Data Incidente"] == "01/08/2026"
 
 
 def test_etapa_processar_resultado_ligacao_recalcula_dias_sem_contato_de_puma_existente(monkeypatch):

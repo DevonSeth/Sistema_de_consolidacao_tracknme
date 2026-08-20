@@ -1,5 +1,5 @@
 """
-Catálogo das 13 etapas de `orchestrator/pipeline.py` + o wiring entre elas
+Catálogo das 14 etapas de `orchestrator/pipeline.py` + o wiring entre elas
 quando várias rodam juntas na mesma cadeia (Painel Operador, tela
 "Operação"). Sem isso, a etapa manual (SGA, login humano) seria
 re-executada por engano sempre que o default `=None` de uma etapa
@@ -96,6 +96,10 @@ CATALOGO: list[EtapaCatalogo] = [
         "publicar_fila_operacional", "E", "Publicar fila operacional",
         "etapa_publicar_fila_operacional",
         entradas={"fila_operacional": "fila_operacional", "divergencias_instalacao": "divergencias_instalacao"},
+    ),
+    EtapaCatalogo(
+        "sincronizar_atendente_tratativas", "F", "Sincronizar seleção do atendente",
+        "etapa_sincronizar_atendente_tratativas", async_=False,
     ),
     EtapaCatalogo(
         "disparo_mensagens", "F", "Disparo de mensagens (WhatsApp)",

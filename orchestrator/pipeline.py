@@ -61,7 +61,7 @@ completa).
 
 import sys
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -1121,6 +1121,40 @@ def _parse_data_atendente(valor: str) -> str | None:
     return None
 
 
+def _data_referencia_iso(linha: dict) -> str | None:
+    """Converte data_incidente/data_contrato (formato BR, com ou sem hora)
+    pro ISO que o Postgres aceita sem erro — mesmos 2 formatos de
+    `_FORMATOS_DATA_ATENDENTE`, mas preserva hora/segundos (`isoformat()`
+    completo, não `.date()`) porque `data_referencia` carrega timestamp
+    real, diferente de `data_agendada`. `None` se vazia ou ilegível (vira
+    NULL no Supabase em vez de repetir o erro de parse do Postgres)."""
+    valor = (_data_referencia(linha) or "").strip()
+    if not valor:
+        return None
+    for formato in _FORMATOS_DATA_ATENDENTE:
+        try:
+            return datetime.strptime(valor, formato).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def _formatar_data_referencia_para_exibicao(valor_iso: str | None) -> str:
+    """Reverte o ISO gravado em `tratativas.data_referencia` pro formato
+    brasileiro exibido nas abas Pendente de Ligação/Encaminhar pra Puma —
+    mantém a mesma aparência da aba Tratativas (que nunca passa por aqui,
+    recalcula direto do dado fresco via `_data_referencia`)."""
+    if not valor_iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(valor_iso)
+    except ValueError:
+        return valor_iso
+    if dt.time() == time(0, 0, 0):
+        return dt.strftime("%d/%m/%Y")
+    return dt.strftime("%d/%m/%Y %H:%M:%S")
+
+
 def _sincronizar_atendente_da_aba(agora: datetime | None = None) -> dict[str, dict]:
     """Lê a aba `Tratativas` atual, sincroniza pro Supabase (por
     "ID (hash)" = chave_unica) os campos que só o atendente edita, e
@@ -1208,6 +1242,24 @@ def _sincronizar_atendente_da_aba(agora: datetime | None = None) -> dict[str, di
     return atendente_por_chave
 
 
+def etapa_sincronizar_atendente_tratativas(agora: datetime | None = None) -> ResultadoEtapa:
+    """Sincroniza só os campos que o atendente marca na aba Tratativas
+    (Selecionado, Atendimento, Base, Técnico etc.) pro Supabase, SEM
+    reprocessar classificação/SGA — achado 2026-08-20: antes disso, a
+    única forma de ver uma marcação nova era rodar `etapa_publicar_fila_
+    operacional` (Fase E) inteira de novo, mesmo quando a fila já tinha
+    sido publicada antes e só a seleção do atendente mudou. Permite rodar
+    só esta etapa + `etapa_disparo_mensagens` quando for esse o caso."""
+    try:
+        atendente_por_chave = _sincronizar_atendente_da_aba(agora or datetime.now())
+    except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
+        return ResultadoEtapa("sincronizar_atendente_tratativas", sucesso=False, mensagem=str(e))
+    return ResultadoEtapa(
+        "sincronizar_atendente_tratativas", sucesso=True,
+        dados={"sincronizadas": len(atendente_por_chave)},
+    )
+
+
 def _dados_hash_chave_unica(linha: dict) -> dict:
     """Campos que `core.dedup.gerar_chave_unica` espera por origem —
     ver `core/dedup.py`. Vêm crus do `incidente`/`registro` original
@@ -1248,7 +1300,7 @@ def _payload_tratativa(linha: dict, chave_unica: str) -> dict:
         "telefone": linha.get("telefone", ""),
         "cidade": linha.get("cidade", ""),
         "bairro": linha.get("bairro", ""),
-        "data_referencia": _data_referencia(linha),
+        "data_referencia": _data_referencia_iso(linha),
         "sga": linha.get("sga", ""),
         "acao_sugerida": linha.get("acao_sugerida", ""),
         "observacao_sistema": linha.get("observacao_sistema", ""),
@@ -1734,7 +1786,7 @@ def _linha_pendente_ligacao(
         "Telefone": tratativa.get("telefone", ""),
         "Cidade": tratativa.get("cidade", ""),
         "Bairro": tratativa.get("bairro", ""),
-        "Data Contrato / Data Incidente": tratativa.get("data_referencia", ""),
+        "Data Contrato / Data Incidente": _formatar_data_referencia_para_exibicao(tratativa.get("data_referencia")),
         "SGA": tratativa.get("sga", ""),
         "Ação Sugerida": tratativa.get("acao_sugerida", ""),
         "Observação do Sistema": tratativa.get("observacao_sistema", ""),
@@ -1880,7 +1932,7 @@ def _linha_encaminhar_puma(tratativa: dict, motivo: str, templates: dict) -> dic
         "Telefone": tratativa.get("telefone", ""),
         "Cidade": tratativa.get("cidade", ""),
         "Bairro": tratativa.get("bairro", ""),
-        "Data Contrato / Data Incidente": tratativa.get("data_referencia", ""),
+        "Data Contrato / Data Incidente": _formatar_data_referencia_para_exibicao(tratativa.get("data_referencia")),
         "Ação Sugerida": tratativa.get("acao_sugerida", ""),
         "Observação do Sistema": tratativa.get("observacao_sistema", ""),
         "Nível de Urgência": templates.get(codigo_regra, {}).get("nivel_urgencia", ""),
