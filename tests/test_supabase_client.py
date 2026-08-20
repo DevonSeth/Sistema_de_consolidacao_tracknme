@@ -196,6 +196,43 @@ def test_upsert_tratativas_em_lote_misto_cada_linha_com_status_certo(monkeypatch
     assert payload_por_chave["chave-nova"]["status"] == sc.STATUS_PENDENTE
 
 
+def test_upsert_tratativas_em_lote_divide_em_mini_lotes(monkeypatch):
+    """Achado 2026-08-20 (mesmo dia, depois da fatia anterior): mandar a
+    fila INTEIRA numa requisição só devolveu um 400 cru do gateway
+    ("JSON could not be generated") -- corrigido dividindo em mini-lotes
+    de tamanho fixo. Aqui o tamanho é reduzido pra 2 (via monkeypatch) pra
+    testar o chunking com poucos itens: 5 linhas / lote de 2 -> 3 chamadas
+    de select e 3 de upsert (2+2+1), não 1 nem 5."""
+    monkeypatch.setattr(sc, "_TAMANHO_LOTE_TRATATIVAS", 2)
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [], [], [],  # 3 selects de "existentes" (nenhuma existe)
+            [
+                {"id": "id-1", "chave_unica": "chave-1", "status": sc.STATUS_PENDENTE},
+                {"id": "id-2", "chave_unica": "chave-2", "status": sc.STATUS_PENDENTE},
+            ],
+            [
+                {"id": "id-3", "chave_unica": "chave-3", "status": sc.STATUS_PENDENTE},
+                {"id": "id-4", "chave_unica": "chave-4", "status": sc.STATUS_PENDENTE},
+            ],
+            [{"id": "id-5", "chave_unica": "chave-5", "status": sc.STATUS_PENDENTE}],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_tratativas_em_lote([
+        {"chave_unica": f"chave-{i}", "origem": "manutencao"} for i in range(1, 6)
+    ])
+
+    selects = [c for c in cliente.chamadas if c[0] == "select"]
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    genesis = _chamadas_insert(cliente, "historico_status_tratativa")
+    assert len(selects) == 3
+    assert [len(u) for u in upserts] == [2, 2, 1]
+    assert len(genesis) == 3
+    assert sum(len(g) for g in genesis) == 5
+
+
 def test_upsert_tratativas_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):
     cliente = _ClienteFalso()
     monkeypatch.setattr(sc, "get_client", lambda: cliente)

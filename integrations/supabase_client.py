@@ -256,6 +256,14 @@ def buscar_candidatas_finalizacao_atendimento() -> list[dict]:
     return resposta.data
 
 
+_TAMANHO_LOTE_TRATATIVAS = 200
+
+
+def _em_lotes(lista: list, tamanho: int):
+    for inicio in range(0, len(lista), tamanho):
+        yield lista[inicio:inicio + tamanho]
+
+
 @retry_erro_transitorio_windows()
 def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
     """Insere/atualiza tratativas em lote (upsert por `chave_unica` —
@@ -264,9 +272,18 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
     ao Supabase POR linha: 1 select pra decidir insert/update + 1
     insert/update + 1 insert de histórico genesis) pelo mesmo motivo já
     resolvido pro SGA em `upsert_situacoes_veiculo_sga_em_lote` (achado
-    2026-08-17): reduz N*3 chamadas de rede síncronas pra 3 chamadas
+    2026-08-17): reduz N*3 chamadas de rede síncronas pra poucas chamadas
     totais, independente de N — contribuiu pro `WinError 10035` (achado
     2026-08-20, muitas idas de rede síncronas seguidas na mesma etapa).
+
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_TRATATIVAS` itens** (achado
+    2026-08-20, mesmo dia: mandar a fila INTEIRA numa única requisição
+    devolveu `{'message': 'JSON could not be generated', 'code': '400',
+    'details': "b'Bad Request'"}` — assinatura de um `400` cru do gateway
+    antes de chegar no PostgREST, não um erro de negócio; a comunidade
+    Supabase recomenda ~500 linhas por chamada de upsert em lote, 200 é
+    conservador o suficiente pra nunca chegar perto do limite de tamanho
+    de corpo da requisição, mesmo com filas grandes).
 
     `status` é buscado por linha já existente e incluído explicitamente
     em TODO payload (nunca omitido) — um upsert em lote heterogêneo do
@@ -286,16 +303,16 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
 
     client = get_client()
     chaves = [dados["chave_unica"] for dados in lista_dados]
-    status_existente_por_chave = {
-        linha["chave_unica"]: linha["status"]
+    status_existente_por_chave: dict[str, str] = {}
+    for lote_chaves in _em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS):
         for linha in (
             client.table("tratativas")
             .select("chave_unica, status")
-            .in_("chave_unica", chaves)
+            .in_("chave_unica", lote_chaves)
             .execute()
             .data
-        )
-    }
+        ):
+            status_existente_por_chave[linha["chave_unica"]] = linha["status"]
 
     agora_iso = _agora_utc_iso()
     payloads = []
@@ -305,17 +322,20 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
         payload["status"] = status_existente_por_chave.get(dados["chave_unica"], STATUS_PENDENTE)
         payloads.append(payload)
 
-    resultado = client.table("tratativas").upsert(payloads, on_conflict="chave_unica").execute()
+    linhas_upsertadas = []
+    for lote_payloads in _em_lotes(payloads, _TAMANHO_LOTE_TRATATIVAS):
+        resultado = client.table("tratativas").upsert(lote_payloads, on_conflict="chave_unica").execute()
+        linhas_upsertadas.extend(resultado.data)
 
     # Linha "genesis" do histórico só pras tratativas novas — garante que
     # toda tratativa tem ao menos 1 linha, então `dashboard_estado_em`
     # sempre acha resposta pra qualquer data >= criação.
     linhas_novas = [
-        linha for linha in resultado.data if linha["chave_unica"] not in status_existente_por_chave
+        linha for linha in linhas_upsertadas if linha["chave_unica"] not in status_existente_por_chave
     ]
-    if linhas_novas:
+    for lote_novas in _em_lotes(linhas_novas, _TAMANHO_LOTE_TRATATIVAS):
         get_client().table("historico_status_tratativa").insert(
-            [{"tratativa_id": linha["id"], "status_novo": linha["status"]} for linha in linhas_novas]
+            [{"tratativa_id": linha["id"], "status_novo": linha["status"]} for linha in lote_novas]
         ).execute()
 
 
