@@ -28,14 +28,42 @@ bug de lógica/negócio):
    encerrada do lado do servidor sem aviso — `httpx` normalmente
    reconecta sozinho, mas nem sempre no meio de uma requisição em
    andamento.
+3. `postgrest.APIError` com `message == "JSON could not be generated"` —
+   achado confirmado no CÓDIGO-FONTE do `postgrest-py`
+   (`postgrest/exceptions.py::generate_default_error_message`): essa
+   mensagem só é gerada quando o corpo da resposta HTTP de erro NÃO é
+   JSON válido (`details` carrega o corpo bruto, ex: `"b'Bad Request'"`)
+   — ou seja, algo ANTES do PostgREST/Postgres (o gateway Cloudflare da
+   Supabase) rejeitou a requisição sem o banco nunca processar, nunca um
+   erro de dado/negócio real (esses sempre chegam formatados em JSON).
+   O próprio `postgrest-py` já tem um retry embutido pra "erros do
+   Cloudflare" (`send_with_retry`), mas documentado como só cobrindo
+   requisições GET/HEAD com status 503/520 — não cobre `upsert`/`insert`
+   (POST) nem o status 400 visto aqui. Esta é a mesma categoria dos
+   achados 1 e 2 (rede/borda instável), só que o Cloudflare devolveu
+   texto puro em vez de fechar a conexão.
 """
 
 import functools
 import time
 
 import httpx
+from postgrest import APIError
 
 _WINERRORS_TRANSITORIOS = {10035}
+_MENSAGENS_GATEWAY_NAO_JSON = {"JSON could not be generated"}
+
+
+def _e_resposta_nao_json_do_gateway(e: BaseException) -> bool:
+    """Assinatura exata de `postgrest.exceptions.generate_default_error_
+    message` -- só é gerada quando o corpo da resposta HTTP de erro não é
+    JSON válido, o que só acontece quando algo antes do PostgREST (o
+    gateway Cloudflare da Supabase) rejeita a requisição sem o Postgres
+    nunca ver. Critério estreito de propósito (mensagem exata, não
+    "qualquer APIError"/qualquer 400) -- um erro de dado/negócio real
+    (ex: coluna inexistente, violação de constraint) sempre chega
+    formatado em JSON pelo PostgREST e NÃO deve ser retentado às cegas."""
+    return isinstance(e, APIError) and e.message in _MENSAGENS_GATEWAY_NAO_JSON
 
 
 def retry_erro_transitorio_windows(tentativas: int = 5, espera_segundos: float = 0.5):
@@ -66,6 +94,10 @@ def retry_erro_transitorio_windows(tentativas: int = 5, espera_segundos: float =
                     time.sleep(espera_segundos * (2 ** (tentativa - 1)))
                 except httpx.TransportError:
                     if tentativa == tentativas:
+                        raise
+                    time.sleep(espera_segundos * (2 ** (tentativa - 1)))
+                except APIError as e:
+                    if not _e_resposta_nao_json_do_gateway(e) or tentativa == tentativas:
                         raise
                     time.sleep(espera_segundos * (2 ** (tentativa - 1)))
         return wrapper

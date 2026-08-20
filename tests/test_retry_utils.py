@@ -1,7 +1,15 @@
 import httpx
 import pytest
+from postgrest import APIError
 
 from integrations.retry_utils import retry_erro_transitorio_windows
+
+
+def _api_error_json_nao_gerado():
+    return APIError({
+        "message": "JSON could not be generated", "code": 400,
+        "hint": "Refer to full message for details", "details": "b'Bad Request'",
+    })
 
 
 def _os_error_com_winerror(winerror):
@@ -101,6 +109,61 @@ def test_httpx_transport_error_esgota_tentativas_e_propaga(monkeypatch):
     with pytest.raises(httpx.TransportError):
         funcao()
     assert len(chamadas) == 3
+
+
+def test_api_error_json_nao_gerado_retenta_e_sucede(monkeypatch):
+    """Achado 3 (mesmo dia, confirmado no código-fonte do postgrest-py):
+    'JSON could not be generated' é a mensagem sintética que a lib gera
+    quando o corpo da resposta HTTP de erro não é JSON válido -- sinal de
+    que algo antes do PostgREST (gateway Cloudflare) rejeitou a
+    requisição, não um erro de dado real."""
+    monkeypatch.setattr("integrations.retry_utils.time.sleep", lambda segundos: None)
+    chamadas = []
+
+    @retry_erro_transitorio_windows()
+    def funcao():
+        chamadas.append(1)
+        if len(chamadas) < 2:
+            raise _api_error_json_nao_gerado()
+        return "recuperado"
+
+    assert funcao() == "recuperado"
+    assert len(chamadas) == 2
+
+
+def test_api_error_json_nao_gerado_esgota_tentativas_e_propaga(monkeypatch):
+    monkeypatch.setattr("integrations.retry_utils.time.sleep", lambda segundos: None)
+    chamadas = []
+
+    @retry_erro_transitorio_windows(tentativas=3)
+    def funcao():
+        chamadas.append(1)
+        raise _api_error_json_nao_gerado()
+
+    with pytest.raises(APIError):
+        funcao()
+    assert len(chamadas) == 3
+
+
+def test_api_error_com_outra_mensagem_nao_retenta():
+    """Critério estreito: um erro de dado/negócio real (ex: coluna
+    inexistente, violação de constraint) chega formatado em JSON pelo
+    PostgREST, com uma mensagem diferente -- NÃO deve ser retentado às
+    cegas (mascararia bugs reais, como o achado de data_referencia de
+    hoje, que também apareceu como erro 400)."""
+    chamadas = []
+
+    @retry_erro_transitorio_windows()
+    def funcao():
+        chamadas.append(1)
+        raise APIError({
+            "message": 'column tratativas.situacao does not exist', "code": "42703",
+            "hint": None, "details": None,
+        })
+
+    with pytest.raises(APIError):
+        funcao()
+    assert len(chamadas) == 1
 
 
 def test_outro_winerror_nao_retenta():
