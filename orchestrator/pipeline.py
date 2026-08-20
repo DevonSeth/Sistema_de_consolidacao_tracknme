@@ -1478,11 +1478,13 @@ async def etapa_publicar_fila_operacional(
         agora_data = agora_dt.date()
         atendente_por_chave = _sincronizar_atendente_da_aba(agora_dt)
 
-        linhas_com_chave = []
-        for linha in fila_operacional:
-            chave_unica = dedup.gerar_chave_unica(linha["origem"], _dados_hash_chave_unica(linha))
-            supabase_client.upsert_tratativa(_payload_tratativa(linha, chave_unica))
-            linhas_com_chave.append((linha, chave_unica))
+        linhas_com_chave = [
+            (linha, dedup.gerar_chave_unica(linha["origem"], _dados_hash_chave_unica(linha)))
+            for linha in fila_operacional
+        ]
+        supabase_client.upsert_tratativas_em_lote(
+            [_payload_tratativa(linha, chave_unica) for linha, chave_unica in linhas_com_chave]
+        )
 
         estado_disparo_por_chave = supabase_client.buscar_estado_disparo_por_chaves(
             [chave_unica for _, chave_unica in linhas_com_chave]

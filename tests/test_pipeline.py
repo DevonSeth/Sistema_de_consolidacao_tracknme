@@ -1946,8 +1946,8 @@ def _preparar_mocks_publicar(
 
     upserts = []
 
-    def _upsert_tratativa_fake(dados):
-        upserts.append(dados)
+    def _upsert_tratativas_em_lote_fake(lista_dados):
+        upserts.extend(lista_dados)
 
     syncs = []
 
@@ -1962,7 +1962,7 @@ def _preparar_mocks_publicar(
 
     monkeypatch.setattr(orch.google_sheets_client, "ler_aba", _ler_aba_fake)
     monkeypatch.setattr(orch.google_sheets_client, "reescrever_aba", _reescrever_aba_fake)
-    monkeypatch.setattr(orch.supabase_client, "upsert_tratativa", _upsert_tratativa_fake)
+    monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", _upsert_tratativas_em_lote_fake)
     monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", _sincronizar_fake)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", _buscar_estado_disparo_fake)
     monkeypatch.setattr(
@@ -2273,7 +2273,7 @@ async def test_etapa_publicar_fila_operacional_falha_ao_reescrever_aba(monkeypat
 
     monkeypatch.setattr(orch.google_sheets_client, "ler_aba", lambda planilha, aba: [])
     monkeypatch.setattr(orch.google_sheets_client, "reescrever_aba", _reescrever_aba_falha)
-    monkeypatch.setattr(orch.supabase_client, "upsert_tratativa", lambda dados: None)
+    monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", lambda lista_dados: None)
     monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", lambda chave, campos: None)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", lambda chaves: {})
     monkeypatch.setattr(orch.supabase_client, "buscar_bases_ativas", lambda: [])
@@ -2954,7 +2954,7 @@ def test_etapa_finalizar_atendimentos_diarios_retorno_associado_pendente_pula(mo
 def test_etapa_finalizar_atendimentos_diarios_nao_grava_nada_no_supabase(monkeypatch):
     monkeypatch.setattr(orch.supabase_client, "buscar_parametros", lambda: {})
     monkeypatch.setattr(orch.newmo_client, "finalizar_atendimento", lambda atendimento_id: "ok")
-    for nome_funcao in ("upsert_tratativa", "atualizar_apos_envio", "marcar_contato_invalido", "sincronizar_campos_atendente"):
+    for nome_funcao in ("upsert_tratativas_em_lote", "atualizar_apos_envio", "marcar_contato_invalido", "sincronizar_campos_atendente"):
         monkeypatch.setattr(
             orch.supabase_client, nome_funcao,
             lambda *a, **k: (_ for _ in ()).throw(AssertionError(f"{nome_funcao} não deveria ser chamada")),

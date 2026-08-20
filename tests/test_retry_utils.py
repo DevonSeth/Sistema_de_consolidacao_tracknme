@@ -50,6 +50,26 @@ def test_winerror_10035_esgota_tentativas_e_propaga(monkeypatch):
     assert len(chamadas) == 3
 
 
+def test_default_e_5_tentativas_com_espera_escalonada(monkeypatch):
+    """Achado 2026-08-20 (mesmo dia): 3 tentativas de 0.5s não foram
+    suficientes numa rodada real -- default subiu pra 5, com a espera
+    dobrando a cada tentativa (mesmo espírito do backoff assíncrono)."""
+    esperas = []
+    monkeypatch.setattr("integrations.retry_utils.time.sleep", lambda segundos: esperas.append(segundos))
+    chamadas = []
+
+    @retry_erro_transitorio_windows()
+    def funcao():
+        chamadas.append(1)
+        raise _os_error_com_winerror(10035)
+
+    with pytest.raises(OSError):
+        funcao()
+
+    assert len(chamadas) == 5
+    assert esperas == [0.5, 1.0, 2.0, 4.0]  # 4 esperas entre as 5 tentativas, dobrando
+
+
 def test_outro_winerror_nao_retenta():
     chamadas = []
 

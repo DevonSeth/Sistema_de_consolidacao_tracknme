@@ -108,26 +108,109 @@ def _chamadas_upsert(cliente, tabela):
 
 
 # --------------------------------------------------------------------------
-# upsert_tratativa — genesis do histórico só no caminho de INSERT
+# upsert_tratativas_em_lote (achado 2026-08-20: substitui upsert_tratativa,
+# até 3 idas ao Supabase POR linha, pelo mesmo padrão em lote já usado em
+# upsert_situacoes_veiculo_sga_em_lote) — genesis do histórico só pras
+# tratativas novas, status preservado explicitamente pras existentes.
 # --------------------------------------------------------------------------
 
-def test_upsert_tratativa_insert_grava_historico_genesis(monkeypatch):
-    cliente = _ClienteFalso(retornos={"tratativas": [[], [{"id": "nova-id"}]]})
+def test_upsert_tratativas_em_lote_faz_3_chamadas_no_total_nao_por_linha(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [{"chave_unica": "chave-existente", "status": "aguardando_resposta"}],
+            [
+                {"id": "id-existente", "chave_unica": "chave-existente", "status": "aguardando_resposta"},
+                {"id": "id-nova", "chave_unica": "chave-nova", "status": sc.STATUS_PENDENTE},
+            ],
+        ],
+    })
     monkeypatch.setattr(sc, "get_client", lambda: cliente)
 
-    sc.upsert_tratativa({"chave_unica": "chave-1", "origem": "manutencao"})
+    sc.upsert_tratativas_em_lote([
+        {"chave_unica": "chave-existente", "origem": "manutencao"},
+        {"chave_unica": "chave-nova", "origem": "manutencao"},
+    ])
 
-    historico = _chamadas_insert(cliente, "historico_status_tratativa")
-    assert historico == [{"tratativa_id": "nova-id", "status_novo": sc.STATUS_PENDENTE}]
+    selects = [c for c in cliente.chamadas if c[0] == "select"]
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    genesis = _chamadas_insert(cliente, "historico_status_tratativa")
+    assert len(selects) == 1
+    assert len(upserts) == 1
+    assert len(genesis) == 1
 
 
-def test_upsert_tratativa_update_nao_grava_historico(monkeypatch):
-    cliente = _ClienteFalso(retornos={"tratativas": [[{"id": "existente-id"}]]})
+def test_upsert_tratativas_em_lote_linha_nova_recebe_status_pendente_e_genesis(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[], [{"id": "id-nova", "chave_unica": "chave-nova", "status": sc.STATUS_PENDENTE}]],
+    })
     monkeypatch.setattr(sc, "get_client", lambda: cliente)
 
-    sc.upsert_tratativa({"chave_unica": "chave-1", "origem": "manutencao"})
+    sc.upsert_tratativas_em_lote([{"chave_unica": "chave-nova", "origem": "manutencao"}])
 
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    assert upserts[0][0]["status"] == sc.STATUS_PENDENTE
+    genesis = _chamadas_insert(cliente, "historico_status_tratativa")
+    assert genesis == [[{"tratativa_id": "id-nova", "status_novo": sc.STATUS_PENDENTE}]]
+
+
+def test_upsert_tratativas_em_lote_linha_existente_preserva_status_sem_genesis(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [{"chave_unica": "chave-1", "status": "aguardando_resposta"}],
+            [{"id": "id-1", "chave_unica": "chave-1", "status": "aguardando_resposta"}],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_tratativas_em_lote([{"chave_unica": "chave-1", "origem": "manutencao"}])
+
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    assert upserts[0][0]["status"] == "aguardando_resposta"
     assert _chamadas_insert(cliente, "historico_status_tratativa") == []
+
+
+def test_upsert_tratativas_em_lote_misto_cada_linha_com_status_certo(monkeypatch):
+    """Prova a correção do achado de heterogeneidade: um upsert em lote
+    do PostgREST aplicaria a coluna `status` (presente só na linha nova)
+    a TODAS as linhas do lote se ela fosse omitida na existente -- aqui
+    ambas as linhas do payload de upsert precisam trazer `status`
+    explícito, cada uma com o valor certo."""
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [{"chave_unica": "chave-existente", "status": "respondido"}],
+            [
+                {"id": "id-existente", "chave_unica": "chave-existente", "status": "respondido"},
+                {"id": "id-nova", "chave_unica": "chave-nova", "status": sc.STATUS_PENDENTE},
+            ],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_tratativas_em_lote([
+        {"chave_unica": "chave-existente", "origem": "manutencao"},
+        {"chave_unica": "chave-nova", "origem": "manutencao"},
+    ])
+
+    payload_por_chave = {p["chave_unica"]: p for p in _chamadas_upsert(cliente, "tratativas")[0]}
+    assert payload_por_chave["chave-existente"]["status"] == "respondido"
+    assert payload_por_chave["chave-nova"]["status"] == sc.STATUS_PENDENTE
+
+
+def test_upsert_tratativas_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_tratativas_em_lote([])
+
+    assert cliente.chamadas == []
+
+
+def test_upsert_tratativas_em_lote_exige_chave_unica_em_cada_item(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    with pytest.raises(ValueError):
+        sc.upsert_tratativas_em_lote([{"origem": "manutencao"}])
 
 
 # --------------------------------------------------------------------------

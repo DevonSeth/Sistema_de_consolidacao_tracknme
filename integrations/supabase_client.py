@@ -257,37 +257,66 @@ def buscar_candidatas_finalizacao_atendimento() -> list[dict]:
 
 
 @retry_erro_transitorio_windows()
-def upsert_tratativa(dados: dict) -> None:
-    """Insere uma tratativa nova ou atualiza a existente, usando
-    `chave_unica` (ver core.dedup.gerar_chave_unica) como chave de busca —
-    não depende de constraint UNIQUE no banco, faz select-then-write.
+def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
+    """Insere/atualiza tratativas em lote (upsert por `chave_unica` —
+    requer a constraint UNIQUE, ver `_handoff/sql_unique_chave_unica_
+    tratativas.sql`) — substitui a antiga `upsert_tratativa` (até 3 idas
+    ao Supabase POR linha: 1 select pra decidir insert/update + 1
+    insert/update + 1 insert de histórico genesis) pelo mesmo motivo já
+    resolvido pro SGA em `upsert_situacoes_veiculo_sga_em_lote` (achado
+    2026-08-17): reduz N*3 chamadas de rede síncronas pra 3 chamadas
+    totais, independente de N — contribuiu pro `WinError 10035` (achado
+    2026-08-20, muitas idas de rede síncronas seguidas na mesma etapa).
+
+    `status` é buscado por linha já existente e incluído explicitamente
+    em TODO payload (nunca omitido) — um upsert em lote heterogêneo do
+    PostgREST monta a lista de colunas do `ON CONFLICT DO UPDATE` a
+    partir da união das chaves presentes em QUALQUER linha do lote; se
+    só as linhas novas tivessem `status` no payload, a coluna ainda
+    entraria no `UPDATE SET` pras linhas existentes, sobrescrevendo com
+    `NULL` quem não a tivesse. Por isso o valor atual é preservado
+    explicitamente pras existentes, e só as novas recebem `STATUS_
+    PENDENTE`.
     """
-    if "chave_unica" not in dados:
-        raise ValueError("dados precisa conter 'chave_unica' para upsert_tratativa")
+    if not lista_dados:
+        return
+    for dados in lista_dados:
+        if "chave_unica" not in dados:
+            raise ValueError("dados precisa conter 'chave_unica' para upsert_tratativas_em_lote")
 
     client = get_client()
-    existente = (
-        client.table("tratativas")
-        .select("id")
-        .eq("chave_unica", dados["chave_unica"])
-        .execute()
-        .data
-    )
-    if existente:
+    chaves = [dados["chave_unica"] for dados in lista_dados]
+    status_existente_por_chave = {
+        linha["chave_unica"]: linha["status"]
+        for linha in (
+            client.table("tratativas")
+            .select("chave_unica, status")
+            .in_("chave_unica", chaves)
+            .execute()
+            .data
+        )
+    }
+
+    agora_iso = _agora_utc_iso()
+    payloads = []
+    for dados in lista_dados:
         payload = dict(dados)
-        payload["updated_at"] = _agora_utc_iso()
-        client.table("tratativas").update(payload).eq(
-            "chave_unica", dados["chave_unica"]
+        payload["updated_at"] = agora_iso
+        payload["status"] = status_existente_por_chave.get(dados["chave_unica"], STATUS_PENDENTE)
+        payloads.append(payload)
+
+    resultado = client.table("tratativas").upsert(payloads, on_conflict="chave_unica").execute()
+
+    # Linha "genesis" do histórico só pras tratativas novas — garante que
+    # toda tratativa tem ao menos 1 linha, então `dashboard_estado_em`
+    # sempre acha resposta pra qualquer data >= criação.
+    linhas_novas = [
+        linha for linha in resultado.data if linha["chave_unica"] not in status_existente_por_chave
+    ]
+    if linhas_novas:
+        get_client().table("historico_status_tratativa").insert(
+            [{"tratativa_id": linha["id"], "status_novo": linha["status"]} for linha in linhas_novas]
         ).execute()
-    else:
-        payload = dict(dados)
-        payload.setdefault("status", STATUS_PENDENTE)
-        resultado = client.table("tratativas").insert(payload).execute()
-        nova_id = resultado.data[0]["id"]
-        # Linha "genesis" do histórico — garante que toda tratativa tem ao
-        # menos 1 linha, então `dashboard_estado_em` sempre acha resposta
-        # pra qualquer data >= criação.
-        _registrar_transicao_status(nova_id, payload["status"])
 
 
 @retry_erro_transitorio_windows()

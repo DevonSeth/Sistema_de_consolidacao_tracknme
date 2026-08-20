@@ -24,11 +24,21 @@ import time
 _WINERRORS_TRANSITORIOS = {10035}
 
 
-def retry_erro_transitorio_windows(tentativas: int = 3, espera_segundos: float = 0.5):
+def retry_erro_transitorio_windows(tentativas: int = 5, espera_segundos: float = 0.5):
     """Decorator pra função síncrona que faz I/O de rede real (Google
     Sheets/Supabase). `getattr(e, "winerror", None)` devolve `None` em
     qualquer plataforma que não seja Windows -- vira no-op seguro fora
-    do Windows, sem precisar checar `sys.platform`."""
+    do Windows, sem precisar checar `sys.platform`.
+
+    Espera dobra a cada tentativa (`espera_segundos * 2**(tentativa-1)`,
+    mesmo espírito do backoff já usado em `_executar_com_tentativas`)
+    -- achado 2026-08-20, mesmo dia: 3 tentativas de 0.5s (1.5s de espera
+    total) não foram suficientes numa rodada real onde o erro voltou a
+    aparecer (a etapa loopa várias chamadas de rede — cada uma com seu
+    próprio orçamento de retry — e algumas encontraram o self-pipe do
+    Windows ainda saturado depois desse tempo curto). 5 tentativas
+    escalonadas (0.5s/1s/2s/4s, ~7.5s de espera total no pior caso) dão
+    mais margem real pro sistema se recuperar."""
     def decorador(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
@@ -38,6 +48,6 @@ def retry_erro_transitorio_windows(tentativas: int = 3, espera_segundos: float =
                 except OSError as e:
                     if getattr(e, "winerror", None) not in _WINERRORS_TRANSITORIOS or tentativa == tentativas:
                         raise
-                    time.sleep(espera_segundos)
+                    time.sleep(espera_segundos * (2 ** (tentativa - 1)))
         return wrapper
     return decorador
