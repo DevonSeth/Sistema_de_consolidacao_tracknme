@@ -53,6 +53,54 @@ function novoEstadoOrigem(): EstadoOrigem {
   return { pendente: 0, emAndamento: 0, concluido: 0 };
 }
 
+// Achado 2026-08-21: `.in()` do PostgREST sempre vira query string numa
+// requisição GET, mesmo mecanismo em qualquer cliente (supabase-js aqui,
+// postgrest-py no orchestrator Python) — com uma lista de ids grande o
+// bastante (ex: 2.228 tratativas abertas), a URL estoura o limite do
+// gateway Cloudflare, que responde "Bad Request" cru (não-JSON) antes de
+// chegar no Postgres. Mesmo fix já aplicado 4x no lado Python hoje
+// (`_em_lotes`/`_TAMANHO_LOTE_TRATATIVAS`) — só apareceu aqui agora porque
+// `tratativas` só atingiu esse volume real pela 1ª vez hoje.
+const TAMANHO_LOTE = 200;
+
+function emLotes<T>(lista: T[], tamanho: number): T[][] {
+  const lotes: T[][] = [];
+  for (let i = 0; i < lista.length; i += tamanho) {
+    lotes.push(lista.slice(i, i + tamanho));
+  }
+  return lotes;
+}
+
+// Achado 2026-08-21 (mesma investigação do chunking acima): o Supabase
+// devolve no máximo 1.000 linhas por `.select()` sem `.range()` explícito
+// -- qualquer leitura da tabela inteira (`tratativas`/`puma_encaminhamentos`)
+// sem paginação SILENCIOSAMENTE trunca o resultado quando o volume real
+// passa de 1.000 (ex: 2.228 tratativas hoje), sem erro nenhum pra avisar.
+// Pior que o crash do chunking: os números do dashboard saem errados sem
+// nenhum sinal. `buscarPaginado` busca TODAS as páginas até uma vir
+// incompleta (sinal de que chegou ao fim).
+const TAMANHO_PAGINA = 1000;
+
+async function buscarPaginado<T>(
+  // `PromiseLike`, não `Promise` -- o query builder do supabase-js
+  // (`PostgrestFilterBuilder`) é "thenable" (implementa `.then()`, dá pra
+  // dar `await` nele direto) mas não implementa a interface `Promise`
+  // completa (`catch`/`finally`), então passar ele sem `await` explícito
+  // só compila contra o tipo mais permissivo.
+  consulta: (inicio: number, fim: number) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>
+): Promise<T[]> {
+  const resultado: T[] = [];
+  let pagina = 0;
+  while (true) {
+    const { data, error } = await consulta(pagina * TAMANHO_PAGINA, (pagina + 1) * TAMANHO_PAGINA - 1);
+    if (error) throw new Error(error.message);
+    resultado.push(...(data ?? []));
+    if (!data || data.length < TAMANHO_PAGINA) break;
+    pagina++;
+  }
+  return resultado;
+}
+
 async function contarNoPeriodo(
   supabase: SupabaseServiceClient,
   tabela: string,
@@ -240,22 +288,27 @@ type TratativaAbertaAgora = {
  * segundo caminho não atualiza `tratativas.status` (ver `sincronizar_
  * status_puma`), por isso a exclusão é feita à parte, com 2 queries. */
 async function buscarAbertasAgora(supabase: SupabaseServiceClient): Promise<TratativaAbertaAgora[]> {
-  const { data: abertas, error } = await supabase
-    .from("tratativas")
-    .select("id, codigo_regra, origem, cidade, cliente, identificador, tentativa_1, tentativa_2, tentativa_3, created_at, status")
-    .neq("status", "finalizado");
-  if (error) throw new Error(error.message);
-  if (!abertas || abertas.length === 0) return [];
+  const abertas = await buscarPaginado<TratativaAbertaAgora>((inicio, fim) =>
+    supabase
+      .from("tratativas")
+      .select("id, codigo_regra, origem, cidade, cliente, identificador, tentativa_1, tentativa_2, tentativa_3, created_at, status")
+      .neq("status", "finalizado")
+      .range(inicio, fim)
+  );
+  if (abertas.length === 0) return [];
 
   const ids = abertas.map((t) => t.id);
-  const { data: concluidosPuma, error: erroPuma } = await supabase
-    .from("puma_encaminhamentos")
-    .select("tratativa_id")
-    .eq("status", "concluido")
-    .in("tratativa_id", ids);
-  if (erroPuma) throw new Error(erroPuma.message);
+  const idsConcluidosPuma = new Set<string>();
+  for (const lote of emLotes(ids, TAMANHO_LOTE)) {
+    const { data: concluidosPuma, error: erroPuma } = await supabase
+      .from("puma_encaminhamentos")
+      .select("tratativa_id")
+      .eq("status", "concluido")
+      .in("tratativa_id", lote);
+    if (erroPuma) throw new Error(erroPuma.message);
+    for (const r of concluidosPuma ?? []) idsConcluidosPuma.add(r.tratativa_id);
+  }
 
-  const idsConcluidosPuma = new Set((concluidosPuma ?? []).map((r) => r.tratativa_id));
   return abertas.filter((t) => !idsConcluidosPuma.has(t.id));
 }
 
@@ -380,17 +433,20 @@ export async function buscarEncaminhadasParaPuma(): Promise<EncaminhadaParaPuma[
   if (encaminhadas.length === 0) return [];
 
   const ids = encaminhadas.map((t) => t.id);
-  const { data: encaminhamentos, error } = await supabase
-    .from("puma_encaminhamentos")
-    .select("tratativa_id, motivo, data_encaminhamento")
-    .in("tratativa_id", ids)
-    .order("data_encaminhamento", { ascending: false });
-  if (error) throw new Error(error.message);
-
-  // Ordenado desc — a 1ª ocorrência de cada tratativa_id já é a mais recente.
+  // Ordenado desc dentro de CADA lote — a 1ª ocorrência de cada
+  // tratativa_id já é a mais recente (cada id cai em exatamente 1 lote,
+  // então a ordenação por lote basta pra escolher certo).
   const maisRecentePorId = new Map<string, { motivo: string | null; data_encaminhamento: string }>();
-  for (const e of encaminhamentos ?? []) {
-    if (!maisRecentePorId.has(e.tratativa_id)) maisRecentePorId.set(e.tratativa_id, e);
+  for (const lote of emLotes(ids, TAMANHO_LOTE)) {
+    const { data: encaminhamentos, error } = await supabase
+      .from("puma_encaminhamentos")
+      .select("tratativa_id, motivo, data_encaminhamento")
+      .in("tratativa_id", lote)
+      .order("data_encaminhamento", { ascending: false });
+    if (error) throw new Error(error.message);
+    for (const e of encaminhamentos ?? []) {
+      if (!maisRecentePorId.has(e.tratativa_id)) maisRecentePorId.set(e.tratativa_id, e);
+    }
   }
 
   const agora = new Date();
@@ -416,11 +472,12 @@ export async function buscarEncaminhadasParaPuma(): Promise<EncaminhadaParaPuma[
  * em vez de limitar linhas). */
 export async function buscarPendentesPorCidade(): Promise<{ cidade: string; quantidade: number }[]> {
   const supabase = createSupabaseServiceClient();
-  const { data, error } = await supabase.from("tratativas").select("cidade").eq("status", "pendente");
-  if (error) throw new Error(error.message);
+  const dados = await buscarPaginado<{ cidade: string | null }>((inicio, fim) =>
+    supabase.from("tratativas").select("cidade").eq("status", "pendente").range(inicio, fim)
+  );
 
   const contagem = new Map<string, number>();
-  for (const linha of data ?? []) {
+  for (const linha of dados) {
     const cidade = (linha.cidade as string | null)?.trim() || "Sem cidade cadastrada";
     contagem.set(cidade, (contagem.get(cidade) ?? 0) + 1);
   }
@@ -466,23 +523,22 @@ export async function buscarEvolucaoBacklog(): Promise<PontoEvolucao[]> {
   if (erroPrimeira) throw new Error(erroPrimeira.message);
   if (!primeiraLinha || primeiraLinha.length === 0) return [];
 
-  const [
-    { data: criadas, error: erroCriadas },
-    { data: finalizadas, error: erroFinalizadas },
-    { data: pumaConcluidas, error: erroPuma },
-  ] = await Promise.all([
-    supabase.from("tratativas").select("created_at"),
-    supabase.from("tratativas").select("finalizado_em").not("finalizado_em", "is", null),
-    supabase.from("puma_encaminhamentos").select("concluido_em").not("concluido_em", "is", null),
+  const [criadas, finalizadas, pumaConcluidas] = await Promise.all([
+    buscarPaginado<{ created_at: string }>((inicio, fim) =>
+      supabase.from("tratativas").select("created_at").range(inicio, fim)
+    ),
+    buscarPaginado<{ finalizado_em: string | null }>((inicio, fim) =>
+      supabase.from("tratativas").select("finalizado_em").not("finalizado_em", "is", null).range(inicio, fim)
+    ),
+    buscarPaginado<{ concluido_em: string | null }>((inicio, fim) =>
+      supabase.from("puma_encaminhamentos").select("concluido_em").not("concluido_em", "is", null).range(inicio, fim)
+    ),
   ]);
-  if (erroCriadas) throw new Error(erroCriadas.message);
-  if (erroFinalizadas) throw new Error(erroFinalizadas.message);
-  if (erroPuma) throw new Error(erroPuma.message);
 
-  const criadasPorDia = contarPorDia((criadas ?? []).map((r) => r.created_at as string));
+  const criadasPorDia = contarPorDia(criadas.map((r) => r.created_at));
   const concluidasPorDia = contarPorDia([
-    ...(finalizadas ?? []).map((r) => r.finalizado_em as string | null),
-    ...(pumaConcluidas ?? []).map((r) => r.concluido_em as string | null),
+    ...finalizadas.map((r) => r.finalizado_em),
+    ...pumaConcluidas.map((r) => r.concluido_em),
   ]);
 
   const cursor = new Date(`${(primeiraLinha[0].created_at as string).slice(0, 10)}T00:00:00.000Z`);
@@ -512,36 +568,44 @@ export async function buscarTempoMedioResolucao(desde: string, ate: string): Pro
   const desdeISO = `${desde}T00:00:00.000Z`;
   const ateISO = `${ate}T23:59:59.999Z`;
 
-  const { data: tratativasConcluidas, error: erroTratativas } = await supabase
-    .from("tratativas")
-    .select("created_at, finalizado_em")
-    .gte("finalizado_em", desdeISO)
-    .lte("finalizado_em", ateISO);
-  if (erroTratativas) throw new Error(erroTratativas.message);
+  const tratativasConcluidas = await buscarPaginado<{ created_at: string; finalizado_em: string | null }>(
+    (inicio, fim) =>
+      supabase
+        .from("tratativas")
+        .select("created_at, finalizado_em")
+        .gte("finalizado_em", desdeISO)
+        .lte("finalizado_em", ateISO)
+        .range(inicio, fim)
+  );
 
-  const { data: encaminhamentosConcluidos, error: erroPuma } = await supabase
-    .from("puma_encaminhamentos")
-    .select("tratativa_id, concluido_em")
-    .gte("concluido_em", desdeISO)
-    .lte("concluido_em", ateISO);
-  if (erroPuma) throw new Error(erroPuma.message);
+  const encaminhamentosConcluidos = await buscarPaginado<{ tratativa_id: string; concluido_em: string | null }>(
+    (inicio, fim) =>
+      supabase
+        .from("puma_encaminhamentos")
+        .select("tratativa_id, concluido_em")
+        .gte("concluido_em", desdeISO)
+        .lte("concluido_em", ateISO)
+        .range(inicio, fim)
+  );
 
   const diasPorItem: number[] = [];
-  for (const t of tratativasConcluidas ?? []) {
+  for (const t of tratativasConcluidas) {
     if (!t.created_at || !t.finalizado_em) continue;
     diasPorItem.push((new Date(t.finalizado_em).getTime() - new Date(t.created_at).getTime()) / 86_400_000);
   }
 
-  const idsTratativasPuma = (encaminhamentosConcluidos ?? []).map((e) => e.tratativa_id).filter(Boolean);
+  const idsTratativasPuma = encaminhamentosConcluidos.map((e) => e.tratativa_id).filter(Boolean);
   if (idsTratativasPuma.length > 0) {
-    const { data: tratativasDosEncaminhamentos, error: erroBusca } = await supabase
-      .from("tratativas")
-      .select("id, created_at")
-      .in("id", idsTratativasPuma);
-    if (erroBusca) throw new Error(erroBusca.message);
-
-    const criadoEmPorId = new Map((tratativasDosEncaminhamentos ?? []).map((t) => [t.id, t.created_at]));
-    for (const e of encaminhamentosConcluidos ?? []) {
+    const criadoEmPorId = new Map<string, string>();
+    for (const lote of emLotes(idsTratativasPuma, TAMANHO_LOTE)) {
+      const { data: tratativasDosEncaminhamentos, error: erroBusca } = await supabase
+        .from("tratativas")
+        .select("id, created_at")
+        .in("id", lote);
+      if (erroBusca) throw new Error(erroBusca.message);
+      for (const t of tratativasDosEncaminhamentos ?? []) criadoEmPorId.set(t.id, t.created_at);
+    }
+    for (const e of encaminhamentosConcluidos) {
       const criadoEm = criadoEmPorId.get(e.tratativa_id);
       if (!criadoEm || !e.concluido_em) continue;
       diasPorItem.push((new Date(e.concluido_em).getTime() - new Date(criadoEm).getTime()) / 86_400_000);
