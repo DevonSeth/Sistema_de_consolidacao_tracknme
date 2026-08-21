@@ -2,7 +2,14 @@ import httpx
 import pytest
 from postgrest import APIError
 
-from integrations.retry_utils import retry_erro_transitorio_windows
+from integrations.retry_utils import ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS, retry_erro_transitorio_windows
+
+
+def test_atraso_entre_chamadas_supabase_e_pequeno_e_positivo():
+    """Sanity: espaçamento anti-rajada (achado 2026-08-21) precisa ser
+    perceptível o suficiente pra quebrar o padrão de rajada, mas pequeno o
+    suficiente pra não pesar em filas com milhares de itens."""
+    assert 0 < ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS <= 0.5
 
 
 def _api_error_json_nao_gerado():

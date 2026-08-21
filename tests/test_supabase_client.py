@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from integrations import supabase_client as sc
@@ -204,6 +207,8 @@ def test_upsert_tratativas_em_lote_divide_em_mini_lotes(monkeypatch):
     testar o chunking com poucos itens: 5 linhas / lote de 2 -> 3 chamadas
     de select e 3 de upsert (2+2+1), não 1 nem 5."""
     monkeypatch.setattr(sc, "_TAMANHO_LOTE_TRATATIVAS", 2)
+    chamadas_sleep = []
+    monkeypatch.setattr(sc, "sleep", lambda segundos: chamadas_sleep.append(segundos))
     cliente = _ClienteFalso(retornos={
         "tratativas": [
             [], [], [],  # 3 selects de "existentes" (nenhuma existe)
@@ -231,6 +236,11 @@ def test_upsert_tratativas_em_lote_divide_em_mini_lotes(monkeypatch):
     assert [len(u) for u in upserts] == [2, 2, 1]
     assert len(genesis) == 3
     assert sum(len(g) for g in genesis) == 5
+    # achado 2026-08-21: 1 sleep por chamada de rede (3 selects + 3 upserts
+    # + 3 genesis) -- espaça as chamadas sequenciais pra não parecer rajada
+    # pro anti-bot do Cloudflare.
+    assert len(chamadas_sleep) == 9
+    assert all(s == sc.ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS for s in chamadas_sleep)
 
 
 def test_upsert_tratativas_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):
@@ -489,6 +499,92 @@ def test_buscar_situacao_manual_atual_por_chaves_devolve_mapa(monkeypatch):
     assert resultado == {"chave-1": "Agendado", "chave-2": ""}
 
 
+def test_buscar_situacao_manual_atual_por_chaves_divide_em_mini_lotes(monkeypatch):
+    """Achado 2026-08-21: `chaves` aqui é toda a aba Tratativas atual — sem
+    chunking, um `.in_()` via GET com muitas chaves pode gerar uma URL
+    grande o bastante pro Cloudflare rejeitar antes do Postgres (mesma
+    causa raiz de `buscar_estado_disparo_por_chaves`)."""
+    monkeypatch.setattr(sc, "_TAMANHO_LOTE_TRATATIVAS", 2)
+    chamadas_sleep = []
+    monkeypatch.setattr(sc, "sleep", lambda s: chamadas_sleep.append(s))
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [{"chave_unica": "chave-1", "situacao_manual": "Agendado"}, {"chave_unica": "chave-2", "situacao_manual": None}],
+            [{"chave_unica": "chave-3", "situacao_manual": "Concluído"}],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_situacao_manual_atual_por_chaves(["chave-1", "chave-2", "chave-3"])
+
+    selects = [c for c in cliente.chamadas if c[0] == "select"]
+    assert len(selects) == 2
+    assert resultado == {"chave-1": "Agendado", "chave-2": "", "chave-3": "Concluído"}
+    assert len(chamadas_sleep) == 2
+
+
+# --------------------------------------------------------------------------
+# buscar_estado_disparo_por_chaves
+# --------------------------------------------------------------------------
+
+def test_buscar_estado_disparo_por_chaves_vazio_nao_consulta(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    assert sc.buscar_estado_disparo_por_chaves([]) == {}
+    assert cliente.chamadas == []
+
+
+def test_buscar_estado_disparo_por_chaves_devolve_mapa(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[{"chave_unica": "chave-1", "status": sc.STATUS_PENDENTE}]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_estado_disparo_por_chaves(["chave-1"])
+
+    assert resultado == {"chave-1": {"chave_unica": "chave-1", "status": sc.STATUS_PENDENTE}}
+
+
+def test_buscar_estado_disparo_por_chaves_divide_em_mini_lotes(monkeypatch):
+    """Achado 2026-08-21, causa raiz CONFIRMADA em produção pelo log de
+    diagnóstico HTTP (server: cloudflare, URL de 35KB): esta era a única
+    chamada de rede da Fase E sem chunking -- com a fila real (~1.900
+    itens), a URL do `.in_("chave_unica", chaves)` estourava o limite do
+    gateway Cloudflare, e nenhuma quantidade de retry resolvia (a URL
+    nunca mudava de tamanho entre tentativas)."""
+    monkeypatch.setattr(sc, "_TAMANHO_LOTE_TRATATIVAS", 2)
+    chamadas_sleep = []
+    monkeypatch.setattr(sc, "sleep", lambda s: chamadas_sleep.append(s))
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [
+            [{"chave_unica": "chave-1", "status": sc.STATUS_PENDENTE}, {"chave_unica": "chave-2", "status": sc.STATUS_RESPONDIDO}],
+            [{"chave_unica": "chave-3", "status": sc.STATUS_FINALIZADO}],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_estado_disparo_por_chaves(["chave-1", "chave-2", "chave-3"])
+
+    selects = [c for c in cliente.chamadas if c[0] == "select"]
+    assert len(selects) == 2
+    assert set(resultado.keys()) == {"chave-1", "chave-2", "chave-3"}
+    assert len(chamadas_sleep) == 2
+
+
+def test_buscar_estado_disparo_por_chaves_anota_lote_no_erro(monkeypatch):
+    class _ClienteQueExplode:
+        def table(self, nome):
+            raise RuntimeError("falha de rede simulada")
+
+    monkeypatch.setattr(sc, "get_client", lambda: _ClienteQueExplode())
+
+    with pytest.raises(RuntimeError) as excinfo:
+        sc.buscar_estado_disparo_por_chaves(["chave-1"])
+
+    assert any("buscar_estado_disparo_por_chaves" in nota for nota in excinfo.value.__notes__)
+
+
 # --------------------------------------------------------------------------
 # contar_pendencias_por_origem
 # --------------------------------------------------------------------------
@@ -642,6 +738,31 @@ def test_buscar_situacoes_veiculo_sga_em_lote_lista_vazia_nao_chama_supabase(mon
     assert cliente.chamadas == []
 
 
+def test_buscar_situacoes_veiculo_sga_em_lote_divide_em_mini_lotes(monkeypatch):
+    """Achado 2026-08-21: mesma causa raiz de `buscar_estado_disparo_por_
+    chaves` -- na escala real (milhares de veículos), o `.in_(...)` via GET
+    sem chunking pode gerar uma URL grande o bastante pro Cloudflare
+    rejeitar. Nunca bateu aqui na prática porque o checkpoint de Fase D
+    reduz a lista antes, mas o risco é o mesmo."""
+    monkeypatch.setattr(sc, "_TAMANHO_LOTE_SGA", 2)
+    chamadas_sleep = []
+    monkeypatch.setattr(sc, "sleep", lambda s: chamadas_sleep.append(s))
+    cliente = _ClienteFalso(retornos={
+        "situacao_veiculo_sga": [
+            [{"chassi": "CHASSI-001", "status": "ATIVO"}, {"chassi": "CHASSI-002", "status": "INATIVO"}],
+            [{"chassi": "CHASSI-003", "status": "ATIVO"}],
+        ],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_situacoes_veiculo_sga_em_lote(["CHASSI-001", "CHASSI-002", "CHASSI-003"])
+
+    selects = [c for c in cliente.chamadas if c[0] == "select"]
+    assert len(selects) == 2
+    assert set(resultado.keys()) == {"CHASSI-001", "CHASSI-002", "CHASSI-003"}
+    assert len(chamadas_sleep) == 2
+
+
 def test_upsert_situacoes_veiculo_sga_em_lote_faz_1_chamada_so(monkeypatch):
     cliente = _ClienteFalso()
     monkeypatch.setattr(sc, "get_client", lambda: cliente)
@@ -681,9 +802,99 @@ def test_upsert_situacoes_veiculo_sga_em_lote_lista_vazia_nao_chama_supabase(mon
     assert cliente.chamadas == []
 
 
+def test_upsert_situacoes_veiculo_sga_em_lote_divide_em_mini_lotes(monkeypatch):
+    """Achado 2026-08-21: mesmo motivo do chunking já aplicado a
+    `upsert_tratativas_em_lote` -- mandar milhares de registros num único
+    POST pode gerar um corpo grande o bastante pro Cloudflare rejeitar."""
+    monkeypatch.setattr(sc, "_TAMANHO_LOTE_SGA", 2)
+    chamadas_sleep = []
+    monkeypatch.setattr(sc, "sleep", lambda s: chamadas_sleep.append(s))
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.upsert_situacoes_veiculo_sga_em_lote([
+        {"chassi": f"CHASSI-{i:03d}", "status": "ATIVO", "desde": None, "atualizado_em": None} for i in range(5)
+    ])
+
+    upserts = _chamadas_upsert(cliente, "situacao_veiculo_sga")
+    assert [len(u) for u in upserts] == [2, 2, 1]
+    assert len(chamadas_sleep) == 3
+
+
 def test_upsert_situacoes_veiculo_sga_em_lote_exige_chassi_em_cada_registro(monkeypatch):
     cliente = _ClienteFalso()
     monkeypatch.setattr(sc, "get_client", lambda: cliente)
 
     with pytest.raises(ValueError):
         sc.upsert_situacoes_veiculo_sga_em_lote([{"status": "ATIVO"}])
+
+
+def test_get_client_desabilita_http2(monkeypatch):
+    """Achado 2026-08-21: HTTP/2 tem um bug documentado do httpcore onde o
+    pool de conexões pode reusar uma conexão já terminada por GOAWAY do
+    servidor -- get_client() força HTTP/1.1 pra eliminar essa classe de
+    erro, não só retentar o sintoma."""
+    monkeypatch.setattr(
+        sc.manager,
+        "carregar_config",
+        lambda: {"supabase": {"url": "https://exemplo.supabase.co", "service_role_key": "chave-fake"}},
+    )
+    sc.get_client.cache_clear()
+    try:
+        cliente = sc.get_client()
+        sessao = cliente.postgrest.session
+        assert sessao._transport._pool._http2 is False
+        assert sessao.timeout.read == 30
+    finally:
+        sc.get_client.cache_clear()
+
+
+def _resposta_http_fake(status_code, headers=None, corpo=b"", metodo="POST", url="https://exemplo.supabase.co/rest/v1/tratativas"):
+    import httpx
+    requisicao = httpx.Request(metodo, url)
+    return httpx.Response(status_code, headers=headers or {}, content=corpo, request=requisicao)
+
+
+def test_registrar_resposta_de_erro_grava_diagnostico_completo(monkeypatch, tmp_path):
+    """Achado 2026-08-21: postgrest-py descarta os headers da resposta HTTP
+    ao montar APIError -- sem eles, uma rejeição do gateway (Cloudflare,
+    identificável por cf-ray) e um erro real do Postgres ficam
+    indistinguíveis na tela. O hook grava o necessário em arquivo local pra
+    diagnóstico definitivo de QUALQUER chamada futura."""
+    caminho = tmp_path / "diagnostico_http_supabase.log"
+    monkeypatch.setattr(sc, "caminho_log_diagnostico_http", lambda: caminho)
+
+    resposta = _resposta_http_fake(
+        400,
+        headers={"cf-ray": "abc123-GRU", "server": "cloudflare", "date": "Fri, 21 Aug 2026 12:00:00 GMT"},
+        corpo=b"Bad Request",
+    )
+    sc._registrar_resposta_de_erro(resposta)
+
+    linhas = caminho.read_text(encoding="utf-8").strip().splitlines()
+    assert len(linhas) == 1
+    registro = json.loads(linhas[0])
+    assert registro["status_code"] == 400
+    assert registro["method"] == "POST"
+    assert registro["cf_ray"] == "abc123-GRU"
+    assert registro["server"] == "cloudflare"
+    assert registro["corpo"] == "Bad Request"
+
+
+def test_registrar_resposta_de_erro_ignora_sucesso(monkeypatch, tmp_path):
+    caminho = tmp_path / "diagnostico_http_supabase.log"
+    monkeypatch.setattr(sc, "caminho_log_diagnostico_http", lambda: caminho)
+
+    sc._registrar_resposta_de_erro(_resposta_http_fake(200, corpo=b"{}"))
+
+    assert not caminho.exists()
+
+
+def test_registrar_resposta_de_erro_nunca_derruba_a_chamada_real(monkeypatch, tmp_path):
+    """Achado 2026-08-21: uma falha ao gravar o log de diagnóstico (disco
+    cheio, pasta sem permissão) nunca pode virar uma exceção nova que
+    mascara o erro HTTP real."""
+    monkeypatch.setattr(sc, "caminho_log_diagnostico_http", lambda: tmp_path / "sem" / "pasta" / "valida" / "x.log")
+    monkeypatch.setattr(Path, "mkdir", lambda self, *a, **k: (_ for _ in ()).throw(OSError("disco cheio")))
+
+    sc._registrar_resposta_de_erro(_resposta_http_fake(400, corpo=b"Bad Request"))

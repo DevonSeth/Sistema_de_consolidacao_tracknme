@@ -53,6 +53,21 @@ from postgrest import APIError
 _WINERRORS_TRANSITORIOS = {10035}
 _MENSAGENS_GATEWAY_NAO_JSON = {"JSON could not be generated"}
 
+ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS = 0.05
+"""Pausa entre chamadas sequenciais ao Supabase em loops que fazem várias
+seguidas (ex: 1 por linha da aba Tratativas, ou 1 por mini-lote de upsert)
+-- achado 2026-08-21: a Supabase hospedada usa proteção DDoS/anti-bot do
+Cloudflare no gateway da API REST (não é um rate-limit numérico
+documentado), que é conhecida por rejeitar rajadas de chamadas
+automatizadas com respostas genéricas não-JSON (`{'message': 'JSON could
+not be generated', ...}`, ver `_e_resposta_nao_json_do_gateway` acima) --
+mesmo com retry, se a rajada em si é o gatilho, repetir a MESMA rajada
+tende a bater no mesmo bloqueio. Espaçar as chamadas reduz o "formato de
+rajada" sem mudar nenhuma lógica de negócio; 50ms é conservador o
+suficiente pra não ser perceptível numa fila de milhares de itens (~1
+minuto extra a cada 1200 chamadas) mas quebra o padrão de picos
+instantâneos."""
+
 
 def _e_resposta_nao_json_do_gateway(e: BaseException) -> bool:
     """Assinatura exata de `postgrest.exceptions.generate_default_error_

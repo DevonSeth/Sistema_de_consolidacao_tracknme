@@ -1880,6 +1880,49 @@ async def test_etapa_consolidar_com_sga_falha_ao_classificar_instalacao_remocao(
     assert resultado.mensagem == "regra de instalação/remoção inválida"
 
 
+# --- _anotar_erro / _mensagem_com_notas (achado 2026-08-21: diagnóstico -----
+# definitivo de sub-etapa, sem trocar o tipo da exceção original) -----------
+
+def test_mensagem_com_notas_sem_notas_cai_pra_str_puro():
+    assert orch._mensagem_com_notas(RuntimeError("erro puro")) == "erro puro"
+
+
+def test_mensagem_com_notas_inclui_contexto_das_notas():
+    erro = RuntimeError("erro de rede")
+    erro.add_note("[etapa_a]")
+    erro.add_note("[sub_passo_b]")
+
+    assert orch._mensagem_com_notas(erro) == "erro de rede | contexto: [etapa_a] > [sub_passo_b]"
+
+
+def test_anotar_erro_anota_e_relanca_sem_trocar_tipo():
+    with pytest.raises(ValueError) as excinfo:
+        with orch._anotar_erro("contexto_teste"):
+            raise ValueError("falha original")
+
+    assert excinfo.value.__notes__ == ["[contexto_teste]"]
+
+
+def test_anotar_erro_nao_interfere_com_retry_por_tipo():
+    """Guarda de não-regressão: `retry_erro_transitorio_windows` decide se
+    retenta com base em `isinstance(e, ...)` -- `add_note` não pode trocar
+    o tipo nem quebrar essa checagem."""
+    import httpx
+
+    tentativas = []
+
+    @orch.supabase_client.retry_erro_transitorio_windows(tentativas=2, espera_segundos=0)
+    def _funcao_com_contexto():
+        with orch._anotar_erro("contexto_teste"):
+            tentativas.append(1)
+            if len(tentativas) < 2:
+                raise httpx.ConnectError("conexão recusada")
+            return "ok"
+
+    assert _funcao_com_contexto() == "ok"
+    assert len(tentativas) == 2
+
+
 # --- etapa_publicar_fila_operacional ----------------------------------------
 
 def _linha_manutencao(placa="ABC1234", data_incidente="01/08/2026 10:00:00", evento="Sem comunicação", **extra):
@@ -1960,6 +2003,7 @@ def _preparar_mocks_publicar(
         chamadas_estado_disparo.append(chaves)
         return {chave: estado_disparo_por_chave[chave] for chave in chaves if chave in estado_disparo_por_chave}
 
+    monkeypatch.setattr(orch, "sleep", lambda segundos: None)
     monkeypatch.setattr(orch.google_sheets_client, "ler_aba", _ler_aba_fake)
     monkeypatch.setattr(orch.google_sheets_client, "reescrever_aba", _reescrever_aba_fake)
     monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", _upsert_tratativas_em_lote_fake)
@@ -2263,7 +2307,8 @@ async def test_etapa_publicar_fila_operacional_falha_ao_ler_aba(monkeypatch):
     resultado = await orch.etapa_publicar_fila_operacional([_linha_manutencao()])
 
     assert resultado.sucesso is False
-    assert resultado.mensagem == "Sheets indisponível pra leitura"
+    assert "Sheets indisponível pra leitura" in resultado.mensagem
+    assert "sincronizar_atendente_da_aba" in resultado.mensagem
 
 
 @pytest.mark.asyncio
@@ -2282,7 +2327,8 @@ async def test_etapa_publicar_fila_operacional_falha_ao_reescrever_aba(monkeypat
     resultado = await orch.etapa_publicar_fila_operacional([_linha_manutencao()])
 
     assert resultado.sucesso is False
-    assert resultado.mensagem == "Sheets indisponível pra escrita"
+    assert "Sheets indisponível pra escrita" in resultado.mensagem
+    assert "reescrever_aba:Tratativas" in resultado.mensagem
 
 
 @pytest.mark.asyncio
@@ -2516,6 +2562,24 @@ def test_etapa_sincronizar_atendente_tratativas_sucesso(monkeypatch):
         "selecionado": True, "tecnico": "", "situacao_manual": "", "observacao_manual": "",
         "discrepancia_revisada": False, "atendimento": "base", "base_id": "base-uuid-1", "ponto_acao_id": None,
     })]
+
+
+def test_sincronizar_atendente_da_aba_espaca_chamadas_sequenciais(monkeypatch):
+    """Achado 2026-08-21: `sincronizar_campos_atendente` roda 1x por linha
+    da aba, sem lote -- com filas grandes isso é uma rajada de chamadas
+    sequenciais que pode disparar a proteção anti-bot do Cloudflare no
+    gateway da Supabase. Espaçar as chamadas reduz esse sinal."""
+    sheet_atual = [_linha_atendente_sheet("chave-1"), _linha_atendente_sheet("chave-2"), _linha_atendente_sheet("chave-3")]
+    chamadas_sleep = []
+    monkeypatch.setattr(orch, "sleep", lambda segundos: chamadas_sleep.append(segundos))
+    _, _, syncs, _ = _preparar_mocks_publicar(monkeypatch, sheet_atual)
+    monkeypatch.setattr(orch, "sleep", lambda segundos: chamadas_sleep.append(segundos))  # sobrescreve o no-op do fixture
+
+    orch._sincronizar_atendente_da_aba(datetime(2026, 8, 21, 9, 0, 0))
+
+    assert len(syncs) == 3
+    assert len(chamadas_sleep) == 3
+    assert all(s == orch.ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS for s in chamadas_sleep)
 
 
 def test_etapa_sincronizar_atendente_tratativas_falha_ao_ler_aba(monkeypatch):

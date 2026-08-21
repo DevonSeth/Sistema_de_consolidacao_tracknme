@@ -60,10 +60,12 @@ completa).
 """
 
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from functools import lru_cache
 from pathlib import Path
+from time import sleep
 from typing import Any, Callable
 
 import holidays
@@ -91,6 +93,7 @@ from core.constants import (
 from core.normalizacao import normalizar_placa
 from config import manager
 from integrations import google_sheets_client, newmo_client, playwright_utils, sga_bot, supabase_client, tracknme_bot
+from integrations.retry_utils import ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS
 
 
 @dataclass
@@ -101,6 +104,37 @@ class ResultadoEtapa:
     dados: dict = field(default_factory=dict)
     aguardando_reconexao: dict | None = None
     cancelado: dict | None = None
+
+
+@contextmanager
+def _anotar_erro(contexto: str):
+    """Anota QUAL sub-etapa estava rodando quando uma exceção aconteceu,
+    sem trocar o tipo dela (`Exception.add_note`, não um wrap novo) --
+    crítico pra não quebrar `retry_erro_transitorio_windows`, que decide
+    se retenta com base no TIPO da exceção original. Achado 2026-08-21:
+    um `try/except` único envolvendo vários sub-passos de rede deixa o
+    erro genérico chegar até a tela sem dizer QUAL desses pontos falhou --
+    cada falha nova virava uma investigação do zero. Complementa
+    `integrations.supabase_client._registrar_resposta_de_erro` (esse diz
+    O QUE o servidor respondeu; isto diz QUAL sub-passo do nosso código
+    estava rodando)."""
+    try:
+        yield
+    except Exception as e:
+        e.add_note(f"[{contexto}]")
+        raise
+
+
+def _mensagem_com_notas(e: BaseException) -> str:
+    """`str(e)` não inclui `__notes__` por padrão -- usar no lugar de
+    `str(e)` ao montar `ResultadoEtapa.mensagem` de qualquer etapa que
+    passa por `_anotar_erro`, pra a tela mostrar o contexto junto com o
+    erro. Sem notas (maioria das etapas, que ainda não usam
+    `_anotar_erro`), cai pra `str(e)` puro -- sem efeito colateral."""
+    notas = getattr(e, "__notes__", None)
+    if not notas:
+        return str(e)
+    return f"{e} | contexto: {' > '.join(notas)}"
 
 
 def _diretorio_downloads() -> Path:
@@ -148,7 +182,7 @@ async def etapa_baixar_relatorios() -> ResultadoEtapa:
     try:
         caminhos = await tracknme_bot.baixar_relatorios()
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("baixar_relatorios", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("baixar_relatorios", sucesso=False, mensagem=_mensagem_com_notas(e))
     return ResultadoEtapa("baixar_relatorios", sucesso=True, dados=caminhos)
 
 
@@ -179,7 +213,7 @@ def etapa_ler_planilha_gestor(caminhos: dict | None = None) -> ResultadoEtapa:
             google_sheets_client.NOME_PLANILHA_ADMINISTRADOR, "Instalação-Remoção"
         )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("ler_planilha_gestor", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("ler_planilha_gestor", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa(
         "ler_planilha_gestor",
@@ -224,7 +258,7 @@ def etapa_motor_de_regras(dados: dict | None = None) -> ResultadoEtapa:
             parametros, templates,
         )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("motor_de_regras", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("motor_de_regras", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa("motor_de_regras", sucesso=True, dados=grupos)
 
@@ -461,7 +495,7 @@ async def _etapa_incidente_2_estagios(
                 cancelado={"pendentes": pendentes},
             )
         except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-            return ResultadoEtapa(etapa, sucesso=False, mensagem=str(e))
+            return ResultadoEtapa(etapa, sucesso=False, mensagem=_mensagem_com_notas(e))
 
     if itens_playwright_pendentes:
         resultados_pw, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
@@ -952,7 +986,7 @@ async def etapa_enriquecimento_sga(
                 cancelado={"pendentes": pendentes},
             )
         except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
+            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     if alvos_playwright_pendentes:
         chassis_playwright = sorted(alvos_playwright_pendentes.keys())
@@ -985,7 +1019,7 @@ async def etapa_enriquecimento_sga(
                 cancelado={"pendentes": list(e.pendentes)},
             )
         except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=str(e))
+            return ResultadoEtapa("enriquecimento_sga", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return _resultado_final(True)
 
@@ -1047,7 +1081,7 @@ async def etapa_consolidar_com_sga(
             {**linha, "origem": "manutencao"} for linha in grupos_manutencao["grupo_3_tratativa_humana"]
         ] + tratativas_instalacao_remocao
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("consolidar_com_sga", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("consolidar_com_sga", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa(
         "consolidar_com_sga",
@@ -1240,6 +1274,7 @@ def _sincronizar_atendente_da_aba(agora: datetime | None = None) -> dict[str, di
             campos_sync["situacao_manual_definida_em"] = agora_dt.isoformat() if situacao_manual else None
 
         supabase_client.sincronizar_campos_atendente(chave, campos_sync)
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
 
     return atendente_por_chave
 
@@ -1255,7 +1290,7 @@ def etapa_sincronizar_atendente_tratativas(agora: datetime | None = None) -> Res
     try:
         atendente_por_chave = _sincronizar_atendente_da_aba(agora or datetime.now())
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("sincronizar_atendente_tratativas", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("sincronizar_atendente_tratativas", sucesso=False, mensagem=_mensagem_com_notas(e))
     return ResultadoEtapa(
         "sincronizar_atendente_tratativas", sucesso=True,
         dados={"sincronizadas": len(atendente_por_chave)},
@@ -1476,19 +1511,22 @@ async def etapa_publicar_fila_operacional(
     try:
         agora_dt = agora or datetime.now()
         agora_data = agora_dt.date()
-        atendente_por_chave = _sincronizar_atendente_da_aba(agora_dt)
+        with _anotar_erro("sincronizar_atendente_da_aba"):
+            atendente_por_chave = _sincronizar_atendente_da_aba(agora_dt)
 
         linhas_com_chave = [
             (linha, dedup.gerar_chave_unica(linha["origem"], _dados_hash_chave_unica(linha)))
             for linha in fila_operacional
         ]
-        supabase_client.upsert_tratativas_em_lote(
-            [_payload_tratativa(linha, chave_unica) for linha, chave_unica in linhas_com_chave]
-        )
+        with _anotar_erro("upsert_tratativas_em_lote"):
+            supabase_client.upsert_tratativas_em_lote(
+                [_payload_tratativa(linha, chave_unica) for linha, chave_unica in linhas_com_chave]
+            )
 
-        estado_disparo_por_chave = supabase_client.buscar_estado_disparo_por_chaves(
-            [chave_unica for _, chave_unica in linhas_com_chave]
-        )
+        with _anotar_erro("buscar_estado_disparo_por_chaves"):
+            estado_disparo_por_chave = supabase_client.buscar_estado_disparo_por_chaves(
+                [chave_unica for _, chave_unica in linhas_com_chave]
+            )
 
         linhas_aba = []
         for linha, chave_unica in linhas_com_chave:
@@ -1505,9 +1543,10 @@ async def etapa_publicar_fila_operacional(
                 continue
             linhas_aba.append(_linha_para_aba(linha, chave_unica, atendente, estado_disparo, agora_data))
 
-        google_sheets_client.reescrever_aba(
-            google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Tratativas", linhas_aba
-        )
+        with _anotar_erro("reescrever_aba:Tratativas"):
+            google_sheets_client.reescrever_aba(
+                google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Tratativas", linhas_aba
+            )
 
         linhas_divergencia = [
             _linha_divergencia_para_aba(
@@ -1515,11 +1554,12 @@ async def etapa_publicar_fila_operacional(
             )
             for linha in divergencias_instalacao
         ]
-        google_sheets_client.reescrever_aba(
-            google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Instalação", linhas_divergencia
-        )
+        with _anotar_erro("reescrever_aba:Analise_Divergencia_Instalacao"):
+            google_sheets_client.reescrever_aba(
+                google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Instalação", linhas_divergencia
+            )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("publicar_fila_operacional", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("publicar_fila_operacional", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa(
         "publicar_fila_operacional",
@@ -1628,7 +1668,7 @@ def etapa_disparo_mensagens(
             else:
                 falhas += 1
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("disparo_mensagens", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("disparo_mensagens", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa(
         "disparo_mensagens",
@@ -1705,7 +1745,7 @@ def etapa_finalizar_atendimentos_diarios(
             except Exception:  # noqa: BLE001 - um item ruim não derruba o lote inteiro
                 falhas += 1
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("finalizar_atendimentos_diarios", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("finalizar_atendimentos_diarios", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     return ResultadoEtapa(
         "finalizar_atendimentos_diarios",
@@ -1871,7 +1911,7 @@ def etapa_escalonar_ligacao(
             linhas_existentes + linhas_novas,
         )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("escalonar_ligacao", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("escalonar_ligacao", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     if cancelado_em is not None:
         return ResultadoEtapa(
@@ -2167,7 +2207,7 @@ def etapa_processar_resultado_ligacao(
             google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Pendente de Ligação", linhas_restantes
         )
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("processar_resultado_ligacao", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("processar_resultado_ligacao", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     if cancelado_em is not None:
         return ResultadoEtapa(
@@ -2335,7 +2375,7 @@ def etapa_processar_alertas(
         linhas_novas = _linhas_alertas(candidatas)
         google_sheets_client.reescrever_aba(google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Alertas", linhas_novas)
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
-        return ResultadoEtapa("processar_alertas", sucesso=False, mensagem=str(e))
+        return ResultadoEtapa("processar_alertas", sucesso=False, mensagem=_mensagem_com_notas(e))
 
     if cancelado_em is not None:
         return ResultadoEtapa(

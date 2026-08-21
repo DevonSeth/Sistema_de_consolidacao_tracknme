@@ -94,13 +94,18 @@ no banco — fica pra uma fatia 2 da Observabilidade, depois do diagnóstico
 de eficiência do SGA/Track N'Me.
 """
 
+import json
+import sys
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
+from time import sleep
 
+import httpx
 from supabase import Client, ClientOptions, create_client
 
 from config import manager
-from integrations.retry_utils import retry_erro_transitorio_windows
+from integrations.retry_utils import ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS, retry_erro_transitorio_windows
 from core.constants import (
     ORIGEM_INSTALACAO,
     ORIGEM_MANUTENCAO,
@@ -179,21 +184,90 @@ def _registrar_transicao_puma(puma_id: str, tratativa_id: str, status_novo: str)
     ).execute()
 
 
+def _diretorio_logs() -> Path:
+    """Mesma convenção de `orchestrator.catalogo_etapas._diretorio_logs`
+    (duplicada de propósito, mesmo padrão já usado por
+    `config.manager._diretorio_config`/`orchestrator.pipeline._diretorio_
+    downloads`): pasta `logs/` ao lado do código-fonte em dev; quando
+    empacotado, em `%LOCALAPPDATA%\\ConsolidacaoTrackNMe\\logs`."""
+    if getattr(sys, "frozen", False):
+        base = manager._diretorio_dados_local()
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "logs"
+
+
+def caminho_log_diagnostico_http() -> Path:
+    return _diretorio_logs() / "diagnostico_http_supabase.log"
+
+
+def _registrar_resposta_de_erro(response: httpx.Response) -> None:
+    """Event hook de resposta do `httpx.Client` (achado 2026-08-21):
+    quando o `postgrest-py` monta `APIError` a partir de uma resposta de
+    erro, ele descarta os headers HTTP (`postgrest/exceptions.py::
+    generate_default_error_message` só guarda `status_code` e
+    `str(r.content)`) -- sem eles, uma rejeição do gateway (Cloudflare,
+    identificável pelo header `cf-ray`) e um erro real do Postgres ficam
+    indistinguíveis na tela, e cada uma vira uma nova rodada de
+    investigação do zero. Este hook dispara em TODA resposta de QUALQUER
+    chamada ao Supabase feita por este cliente (presente ou futura, não só
+    `tratativas`) e grava o necessário pra diagnóstico definitivo -- nunca
+    derruba a chamada real mesmo se o log falhar (arquivo cheio, disco
+    sem espaço etc)."""
+    if response.status_code < 400:
+        return
+    try:
+        response.read()
+        registro = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status_code": response.status_code,
+            "method": response.request.method,
+            "url": str(response.request.url),
+            "cf_ray": response.headers.get("cf-ray"),
+            "server": response.headers.get("server"),
+            "date": response.headers.get("date"),
+            "content_type": response.headers.get("content-type"),
+            "corpo": response.text[:2000],
+        }
+        caminho = caminho_log_diagnostico_http()
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        with open(caminho, "a", encoding="utf-8") as arquivo:
+            arquivo.write(json.dumps(registro, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - diagnóstico nunca pode derrubar a chamada real
+        pass
+
+
 @lru_cache(maxsize=1)
 def get_client() -> Client:
     """Cliente Supabase, criado uma única vez (singleton). Se a config for
     resalva com credenciais novas em runtime, chamar `get_client.cache_clear()`
     antes da próxima chamada.
 
-    `postgrest_client_timeout` explícito (achado 2026-08-17): o default da
-    biblioteca já é 120s, mas deixamos explícito e mais curto — uma
-    chamada que nunca recebe resposta não pode travar a etapa (e,
-    principalmente, a trava de execução) por tempo indefinido. Só afeta
-    chamadas de rede de verdade; nada muda pra quem já responde rápido.
+    `http2=False` explícito (achado 2026-08-21, investigação de causa raiz
+    depois de 6 erros de rede diferentes em 24h na mesma etapa): o default
+    do `postgrest-py` é HTTP/2, e o pool de conexões do `httpcore` tem um
+    bug documentado (PRs abertos #679/#683, ainda sem fix completo em
+    2025) onde uma conexão HTTP/2 terminada por GOAWAY do servidor (comum
+    atrás de Cloudflare, que recicla conexões após um número fixo de
+    requisições) às vezes não é detectada como morta antes de ser
+    reusada, surgindo como `httpx.RemoteProtocolError`/`ConnectionTerminated`
+    mesmo com retry (o retry reusa o mesmo cliente singleton, então pode
+    reusar a mesma conexão quebrada). HTTP/1.1 não tem essa classe de bug
+    -- elimina a causa raiz em vez de só ampliar o retry, que continua
+    cobrindo drops residuais de conexão (ver `retry_erro_transitorio_
+    windows`). Timeout de 30s (achado 2026-08-17, antes via
+    `postgrest_client_timeout`) agora fica no `httpx.Client` diretamente,
+    porque esse parâmetro é ignorado pelo `postgrest-py` quando um
+    `httpx_client` customizado é passado. `event_hooks={"response": [...]}`
+    grava diagnóstico completo (headers + corpo) de toda resposta de erro
+    em arquivo local — ver `_registrar_resposta_de_erro`.
     """
     cfg = manager.carregar_config()["supabase"]
+    cliente_http = httpx.Client(
+        http2=False, timeout=30, event_hooks={"response": [_registrar_resposta_de_erro]}
+    )
     return create_client(
-        cfg["url"], cfg["service_role_key"], options=ClientOptions(postgrest_client_timeout=30)
+        cfg["url"], cfg["service_role_key"], options=ClientOptions(httpx_client=cliente_http)
     )
 
 
@@ -264,6 +338,10 @@ def _em_lotes(lista: list, tamanho: int):
         yield lista[inicio:inicio + tamanho]
 
 
+def _total_lotes(n: int, tamanho: int) -> int:
+    return (n + tamanho - 1) // tamanho if n else 0
+
+
 @retry_erro_transitorio_windows()
 def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
     """Insere/atualiza tratativas em lote (upsert por `chave_unica` —
@@ -304,15 +382,25 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
     client = get_client()
     chaves = [dados["chave_unica"] for dados in lista_dados]
     status_existente_por_chave: dict[str, str] = {}
-    for lote_chaves in _em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS):
-        for linha in (
-            client.table("tratativas")
-            .select("chave_unica, status")
-            .in_("chave_unica", lote_chaves)
-            .execute()
-            .data
-        ):
+    total_lotes_select = _total_lotes(len(chaves), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_chaves in enumerate(_em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            linhas = (
+                client.table("tratativas")
+                .select("chave_unica, status")
+                .in_("chave_unica", lote_chaves)
+                .execute()
+                .data
+            )
+        except Exception as e:
+            e.add_note(
+                f"upsert_tratativas_em_lote: select existentes, lote {indice}/{total_lotes_select} "
+                f"(tamanho={len(lote_chaves)}, chaves {lote_chaves[0]}..{lote_chaves[-1]})"
+            )
+            raise
+        for linha in linhas:
             status_existente_por_chave[linha["chave_unica"]] = linha["status"]
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
 
     agora_iso = _agora_utc_iso()
     payloads = []
@@ -323,9 +411,19 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
         payloads.append(payload)
 
     linhas_upsertadas = []
-    for lote_payloads in _em_lotes(payloads, _TAMANHO_LOTE_TRATATIVAS):
-        resultado = client.table("tratativas").upsert(lote_payloads, on_conflict="chave_unica").execute()
+    total_lotes_upsert = _total_lotes(len(payloads), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_payloads in enumerate(_em_lotes(payloads, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            resultado = client.table("tratativas").upsert(lote_payloads, on_conflict="chave_unica").execute()
+        except Exception as e:
+            chaves_lote = [p["chave_unica"] for p in lote_payloads]
+            e.add_note(
+                f"upsert_tratativas_em_lote: upsert, lote {indice}/{total_lotes_upsert} "
+                f"(tamanho={len(lote_payloads)}, chaves {chaves_lote[0]}..{chaves_lote[-1]})"
+            )
+            raise
         linhas_upsertadas.extend(resultado.data)
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
 
     # Linha "genesis" do histórico só pras tratativas novas — garante que
     # toda tratativa tem ao menos 1 linha, então `dashboard_estado_em`
@@ -333,10 +431,20 @@ def upsert_tratativas_em_lote(lista_dados: list[dict]) -> None:
     linhas_novas = [
         linha for linha in linhas_upsertadas if linha["chave_unica"] not in status_existente_por_chave
     ]
-    for lote_novas in _em_lotes(linhas_novas, _TAMANHO_LOTE_TRATATIVAS):
-        get_client().table("historico_status_tratativa").insert(
-            [{"tratativa_id": linha["id"], "status_novo": linha["status"]} for linha in lote_novas]
-        ).execute()
+    total_lotes_genesis = _total_lotes(len(linhas_novas), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_novas in enumerate(_em_lotes(linhas_novas, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            get_client().table("historico_status_tratativa").insert(
+                [{"tratativa_id": linha["id"], "status_novo": linha["status"]} for linha in lote_novas]
+            ).execute()
+        except Exception as e:
+            chaves_lote = [linha["chave_unica"] for linha in lote_novas]
+            e.add_note(
+                f"upsert_tratativas_em_lote: insert genesis, lote {indice}/{total_lotes_genesis} "
+                f"(tamanho={len(lote_novas)}, chaves {chaves_lote[0]}..{chaves_lote[-1]})"
+            )
+            raise
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
 
 
 @retry_erro_transitorio_windows()
@@ -351,23 +459,47 @@ def buscar_estado_disparo_por_chaves(chaves: list[str]) -> dict[str, dict]:
     atendente editando a planilha, então só ficam corretos se lidos de
     volta do Supabase a cada ciclo.
 
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_TRATATIVAS` itens** (achado
+    2026-08-21, causa raiz confirmada pelo log de diagnóstico HTTP: com a
+    fila real girando ~1.900 itens, esta era a ÚNICA chamada de rede da
+    Fase E que nunca tinha ganhado chunking -- o filtro `.in_("chave_
+    unica", chaves)` é resolvido via query string (requisição GET), e a
+    lista inteira gerava uma URL de ~35KB. O Cloudflare (gateway da
+    Supabase, confirmado pelo header `server: cloudflare` no log) rejeita
+    isso ANTES de chegar no PostgREST/Postgres com um `400` cru -- por
+    isso nenhuma quantidade de retry resolvia: a URL nunca mudava de
+    tamanho entre tentativas, o limite era sempre o mesmo).
+
     Devolve `{chave_unica: {...}}`; `{}` se `chaves` for vazio (evita
     round-trip sem necessidade).
     """
     if not chaves:
         return {}
     client = get_client()
-    linhas = (
-        client.table("tratativas")
-        .select(
-            "chave_unica, status, status_contato, tentativa_1, tentativa_2, tentativa_3, "
-            "resposta, data_resposta, retorno_associado, created_at"
-        )
-        .in_("chave_unica", chaves)
-        .execute()
-        .data
-    )
-    return {linha["chave_unica"]: linha for linha in linhas}
+    estado_por_chave: dict[str, dict] = {}
+    total_lotes = _total_lotes(len(chaves), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_chaves in enumerate(_em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            linhas = (
+                client.table("tratativas")
+                .select(
+                    "chave_unica, status, status_contato, tentativa_1, tentativa_2, tentativa_3, "
+                    "resposta, data_resposta, retorno_associado, created_at"
+                )
+                .in_("chave_unica", lote_chaves)
+                .execute()
+                .data
+            )
+        except Exception as e:
+            e.add_note(
+                f"buscar_estado_disparo_por_chaves: lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_chaves)}, chaves {lote_chaves[0]}..{lote_chaves[-1]})"
+            )
+            raise
+        for linha in linhas:
+            estado_por_chave[linha["chave_unica"]] = linha
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+    return estado_por_chave
 
 
 @retry_erro_transitorio_windows()
@@ -378,19 +510,38 @@ def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]
     quando o valor muda de verdade (sem isso, `updated_at`/esse timestamp
     seriam tocados todo ciclo, mesmo sem mudança).
 
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_TRATATIVAS` itens** (mesmo
+    achado 2026-08-21 de `buscar_estado_disparo_por_chaves`: `chaves` aqui
+    é TODA a aba Tratativas atual, e o mesmo `.in_(...)` via query string
+    de uma requisição GET pode gerar uma URL grande o bastante pro
+    Cloudflare rejeitar antes de chegar no Postgres).
+
     Devolve `{chave_unica: situacao_manual}`; `{}` se `chaves` for vazio.
     """
     if not chaves:
         return {}
     client = get_client()
-    linhas = (
-        client.table("tratativas")
-        .select("chave_unica, situacao_manual")
-        .in_("chave_unica", chaves)
-        .execute()
-        .data
-    )
-    return {linha["chave_unica"]: linha.get("situacao_manual") or "" for linha in linhas}
+    situacao_por_chave: dict[str, str] = {}
+    total_lotes = _total_lotes(len(chaves), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_chaves in enumerate(_em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            linhas = (
+                client.table("tratativas")
+                .select("chave_unica, situacao_manual")
+                .in_("chave_unica", lote_chaves)
+                .execute()
+                .data
+            )
+        except Exception as e:
+            e.add_note(
+                f"buscar_situacao_manual_atual_por_chaves: lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_chaves)}, chaves {lote_chaves[0]}..{lote_chaves[-1]})"
+            )
+            raise
+        for linha in linhas:
+            situacao_por_chave[linha["chave_unica"]] = linha.get("situacao_manual") or ""
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+    return situacao_por_chave
 
 
 @retry_erro_transitorio_windows()
@@ -718,6 +869,9 @@ def buscar_pontos_acao_ativos() -> list[dict]:
     )
 
 
+_TAMANHO_LOTE_SGA = 200
+
+
 @retry_erro_transitorio_windows()
 def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
     """Último status do SGA conhecido pra cada um de `chassis`, numa leitura
@@ -728,18 +882,40 @@ def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
     entram chassis que já tinham situação conhecida. Ver
     `core.motor_regras_instalacao_remocao.atualizar_situacao_sga` pra a
     lógica pura que decide se `desde` reinicia ou não.
+
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_SGA` itens** (achado
+    2026-08-21, mesma causa raiz de `buscar_estado_disparo_por_chaves`:
+    com "milhares de veículos", o `.in_(...)` via query string de uma
+    requisição GET pode gerar uma URL grande o bastante pro Cloudflare
+    rejeitar antes de chegar no Postgres — nunca bateu aqui na prática
+    porque o checkpoint de Fase D (`_situacoes_veiculo_sga_recentes`) hoje
+    reduz a lista antes de chegar aqui, mas o risco é real e crescente com
+    o volume de Instalação/Remoção).
     """
     if not chassis:
         return {}
     client = get_client()
-    linhas = (
-        client.table("situacao_veiculo_sga")
-        .select("*")
-        .in_("chassi", chassis)
-        .execute()
-        .data
-    )
-    return {linha["chassi"]: linha for linha in linhas}
+    situacao_por_chassi: dict[str, dict] = {}
+    total_lotes = _total_lotes(len(chassis), _TAMANHO_LOTE_SGA)
+    for indice, lote_chassis in enumerate(_em_lotes(chassis, _TAMANHO_LOTE_SGA), start=1):
+        try:
+            linhas = (
+                client.table("situacao_veiculo_sga")
+                .select("*")
+                .in_("chassi", lote_chassis)
+                .execute()
+                .data
+            )
+        except Exception as e:
+            e.add_note(
+                f"buscar_situacoes_veiculo_sga_em_lote: lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_chassis)}, chassis {lote_chassis[0]}..{lote_chassis[-1]})"
+            )
+            raise
+        for linha in linhas:
+            situacao_por_chassi[linha["chassi"]] = linha
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+    return situacao_por_chassi
 
 
 @retry_erro_transitorio_windows()
@@ -752,7 +928,12 @@ def upsert_situacoes_veiculo_sga_em_lote(registros: list[dict]) -> None:
     de decidir insert vs. update). Espera uma lista de dicts no formato de
     `core.motor_regras_instalacao_remocao.atualizar_situacao_sga`;
     `desde`/`atualizado_em` podem vir como `datetime` (o core não conhece
-    formato de Supabase, converte-se aqui pra ISO)."""
+    formato de Supabase, converte-se aqui pra ISO).
+
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_SGA` itens** (achado
+    2026-08-21, mesmo motivo do chunking já aplicado a `upsert_tratativas_
+    em_lote`: mandar milhares de registros num único POST pode gerar um
+    corpo grande o bastante pro Cloudflare rejeitar antes do Postgres)."""
     if not registros:
         return
     payloads = []
@@ -764,7 +945,19 @@ def upsert_situacoes_veiculo_sga_em_lote(registros: list[dict]) -> None:
             if isinstance(payload.get(campo), datetime):
                 payload[campo] = payload[campo].isoformat()
         payloads.append(payload)
-    get_client().table("situacao_veiculo_sga").upsert(payloads, on_conflict="chassi").execute()
+    client = get_client()
+    total_lotes = _total_lotes(len(payloads), _TAMANHO_LOTE_SGA)
+    for indice, lote_payloads in enumerate(_em_lotes(payloads, _TAMANHO_LOTE_SGA), start=1):
+        try:
+            client.table("situacao_veiculo_sga").upsert(lote_payloads, on_conflict="chassi").execute()
+        except Exception as e:
+            chassis_lote = [p["chassi"] for p in lote_payloads]
+            e.add_note(
+                f"upsert_situacoes_veiculo_sga_em_lote: lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_payloads)}, chassis {chassis_lote[0]}..{chassis_lote[-1]})"
+            )
+            raise
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
 
 
 @retry_erro_transitorio_windows()
