@@ -130,19 +130,26 @@ def test_coluna_letra(indice, letra):
 
 
 class WorksheetComValidacao(WorksheetFalso):
-    def __init__(self):
+    def __init__(self, row_count=10):
         super().__init__()
         self.validacoes = []
+        self.row_count = row_count
+        self.resizes = []
 
     def add_validation(self, range, condition_type, values, strict=False, showCustomUi=False):
         self.validacoes.append((range, condition_type, values, strict, showCustomUi))
+
+    def resize(self, rows):
+        self.resizes.append(rows)
+        self.row_count = rows
 
 
 def _validacao_esperada(cabecalho, coluna, valores):
     letra = sheets._coluna_letra(cabecalho.index(coluna) + 1)
     # showCustomUi=True obrigatório em toda ONE_OF_LIST — achado 2026-08-14/15:
     # sem isso a validação vale mas o Sheets não desenha o dropdown de verdade.
-    return (f"{letra}2:{letra}300", sheets.ValidationConditionType.one_of_list, valores, False, True)
+    limite = sheets._LINHA_LIMITE_VALIDACAO
+    return (f"{letra}2:{letra}{limite}", sheets.ValidationConditionType.one_of_list, valores, False, True)
 
 
 def test_configurar_validacao_atendimento_aplica_nas_2_abas(monkeypatch):
@@ -163,6 +170,18 @@ def test_configurar_validacao_atendimento_aplica_nas_2_abas(monkeypatch):
             _validacao_esperada(cabecalho, "Base", ["Base Afogados"]),
             _validacao_esperada(cabecalho, "Ponto de Ação", ["Ponto Centro"]),
         ]
+        assert fakes[aba].resizes == [sheets._LINHA_LIMITE_VALIDACAO]
+
+
+def test_configurar_validacao_atendimento_nao_redimensiona_se_ja_e_grande(monkeypatch):
+    """Achado 2026-08-21: redimensionar de novo quando a aba já é grande o
+    suficiente seria uma chamada de rede desnecessária a cada setup."""
+    fake = WorksheetComValidacao(row_count=sheets._LINHA_LIMITE_VALIDACAO + 1000)
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.configurar_validacao_atendimento([], [])
+
+    assert fake.resizes == []
 
 
 def test_configurar_validacao_situacao_manual(monkeypatch):
@@ -174,6 +193,7 @@ def test_configurar_validacao_situacao_manual(monkeypatch):
     assert fake.validacoes == [
         _validacao_esperada(sheets.CABECALHO_TRATATIVAS, "Situação Manual", sheets._SITUACAO_MANUAL_VALORES)
     ]
+    assert fake.resizes == [sheets._LINHA_LIMITE_VALIDACAO]
 
 
 def test_configurar_validacao_retornou_conseguiu_agendar(monkeypatch):
@@ -187,6 +207,7 @@ def test_configurar_validacao_retornou_conseguiu_agendar(monkeypatch):
         _validacao_esperada(cabecalho, "Retornou?", sheets._RETORNOU_CONSEGUIU_AGENDAR_VALORES),
         _validacao_esperada(cabecalho, "Conseguiu Agendar?", sheets._RETORNOU_CONSEGUIU_AGENDAR_VALORES),
     ]
+    assert fake.resizes == [sheets._LINHA_LIMITE_VALIDACAO]
 
 
 def test_configurar_validacao_status_puma(monkeypatch):
@@ -198,6 +219,7 @@ def test_configurar_validacao_status_puma(monkeypatch):
     assert fake.validacoes == [
         _validacao_esperada(sheets.CABECALHO_ENCAMINHAR_PUMA, "Status", sheets._STATUS_PUMA_VALORES)
     ]
+    assert fake.resizes == [sheets._LINHA_LIMITE_VALIDACAO]
 
 
 def test_configurar_checkbox_finalizado_pendente_ligacao(monkeypatch):
@@ -207,7 +229,9 @@ def test_configurar_checkbox_finalizado_pendente_ligacao(monkeypatch):
     sheets.configurar_checkbox_finalizado_pendente_ligacao()
 
     letra = sheets._coluna_letra(sheets.CABECALHO_PENDENTE_LIGACAO.index("Finalizado") + 1)
-    assert fake.validacoes == [(f"{letra}2:{letra}300", sheets.ValidationConditionType.boolean, [], True, False)]
+    limite = sheets._LINHA_LIMITE_VALIDACAO
+    assert fake.validacoes == [(f"{letra}2:{letra}{limite}", sheets.ValidationConditionType.boolean, [], True, False)]
+    assert fake.resizes == [limite]
 
 
 class WorksheetComFormato(WorksheetFalso):
@@ -301,8 +325,10 @@ def test_limpar_validacoes_aba_limpa_a_faixa_inteira_da_aba(monkeypatch):
     assert grid_range["startRowIndex"] == 1  # linha 2 (pula cabeçalho)
     assert grid_range["startColumnIndex"] == 0
     assert grid_range["endColumnIndex"] == len(sheets.CABECALHO_ALERTAS)
+    assert grid_range["endRowIndex"] == sheets._LINHA_LIMITE_VALIDACAO
     # sem "rule" no request = limpa a validação existente (API do Sheets)
     assert "rule" not in body["requests"][0]["setDataValidation"]
+    assert fake.resizes == [sheets._LINHA_LIMITE_VALIDACAO]
 
 
 def test_configurar_checkboxes_tratativas_aplica_nas_4_colunas(monkeypatch):
@@ -311,10 +337,11 @@ def test_configurar_checkboxes_tratativas_aplica_nas_4_colunas(monkeypatch):
 
     sheets.configurar_checkboxes_tratativas()
 
+    limite = sheets._LINHA_LIMITE_VALIDACAO
     esperado = [
         (
             f"{sheets._coluna_letra(sheets.CABECALHO_TRATATIVAS.index(coluna) + 1)}2:"
-            f"{sheets._coluna_letra(sheets.CABECALHO_TRATATIVAS.index(coluna) + 1)}300",
+            f"{sheets._coluna_letra(sheets.CABECALHO_TRATATIVAS.index(coluna) + 1)}{limite}",
             sheets.ValidationConditionType.boolean,
             [],
             True,
@@ -323,6 +350,8 @@ def test_configurar_checkboxes_tratativas_aplica_nas_4_colunas(monkeypatch):
         for coluna in sheets._COLUNAS_CHECKBOX_TRATATIVAS
     ]
     assert fake.validacoes == esperado
+    # 1 resize só, não 1 por coluna (row_count já fica >= limite depois do 1º)
+    assert fake.resizes == [limite]
 
 
 class WorksheetFormatacao:

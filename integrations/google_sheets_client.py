@@ -438,10 +438,25 @@ def configurar_formatacao_condicional(limiar_dias_sem_contato: int = 7) -> None:
         sh.batch_update({"requests": requests})
 
 
-_LINHA_LIMITE_VALIDACAO = 300  # mesmo limite já usado no setup (não versionado
-# em código) dos outros checkboxes/dropdowns dessa planilha, 2026-08-07 — ver
-# `ler_aba`: aplicar validação numa faixa maior que o conteúdo real faz o
-# Sheets tratar célula nunca escrita como "com valor", gerando linha fantasma.
+_LINHA_LIMITE_VALIDACAO = 10_000  # achado 2026-08-21: o teto antigo (300)
+# datava de quando o volume real era muito menor -- com a fila real girando
+# ~1.900 itens, >80% da aba ficava sem checkbox/dropdown (aparecia como
+# texto "FALSE" cru). O motivo histórico do teto baixo (evitar "linha
+# fantasma", ver `ler_aba`) já não se aplica: `ler_aba` descarta toda linha
+# sem "ID (hash)" preenchido, o que já neutraliza esse efeito colateral
+# independente de quão larga for a faixa de validação. Mesmo valor de
+# `_LINHA_LIMITE_FORMATACAO_CONDICIONAL` (folga generosa e já aceita nesta
+# planilha), mantido como constante separada por serem conceitos diferentes.
+
+
+def _garantir_linhas_minimas(ws: gspread.Worksheet, minimo: int) -> None:
+    """Redimensiona a aba ANTES de aplicar validação/formatação numa faixa
+    maior que o grid atual -- achado 2026-08-07 (ver `configurar_
+    formatacao_condicional`): a API sempre recorta o range pedido pro
+    tamanho ATUAL da aba no momento da chamada, mesmo pedindo um valor
+    maior."""
+    if ws.row_count < minimo:
+        ws.resize(rows=minimo)
 
 
 @retry_erro_transitorio_windows()
@@ -466,6 +481,7 @@ def limpar_validacoes_aba(aba: str) -> None:
     """
     cabecalho = _CABECALHOS_OPERACIONAL[aba]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, aba)
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     ultima_letra = _coluna_letra(len(cabecalho))
     grid = a1_range_to_grid_range(f"A2:{ultima_letra}{_LINHA_LIMITE_VALIDACAO}", ws.id)
     ws.client.batch_update(ws.spreadsheet_id, {"requests": [{"setDataValidation": {"range": grid}}]})
@@ -505,8 +521,8 @@ def configurar_validacao_atendimento(
     não conhece o Supabase diretamente, mesmo princípio de isolamento já
     usado nas outras integrações.
 
-    Faixa de linhas limitada a 300, mesmo valor e mesmo motivo já usado
-    nos outros dropdowns/checkboxes dessas 2 abas (ver comentário de
+    Faixa de linhas limitada a `_LINHA_LIMITE_VALIDACAO`, mesmo valor e
+    mesmo motivo já usado nos outros dropdowns/checkboxes dessas 2 abas (ver comentário de
     `_LINHA_LIMITE_VALIDACAO`).
 
     Achado ao vivo 2026-08-14/15 (auditoria de validações): `showCustomUi`
@@ -520,6 +536,7 @@ def configurar_validacao_atendimento(
     for aba in _ABAS_COM_ATENDIMENTO:
         cabecalho = _CABECALHOS_OPERACIONAL[aba]
         ws = _worksheet(NOME_PLANILHA_OPERACIONAL, aba)
+        _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
         for coluna, valores in (
             ("Atendimento", _ATENDIMENTO_VALORES),
             ("Base", nomes_bases),
@@ -536,6 +553,7 @@ def configurar_validacao_atendimento(
 def _configurar_checkbox(aba: str, coluna: str) -> None:
     cabecalho = _CABECALHOS_OPERACIONAL[aba]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, aba)
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     letra = _coluna_letra(cabecalho.index(coluna) + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
     ws.add_validation(intervalo, ValidationConditionType.boolean, [], strict=True)
@@ -598,6 +616,7 @@ def configurar_validacao_situacao_manual() -> None:
     """
     cabecalho = _CABECALHOS_OPERACIONAL["Tratativas"]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Tratativas")
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     letra = _coluna_letra(cabecalho.index("Situação Manual") + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
     ws.add_validation(
@@ -627,6 +646,7 @@ def configurar_validacao_retornou_conseguiu_agendar() -> None:
     """
     cabecalho = _CABECALHOS_OPERACIONAL["Pendente de Ligação"]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Pendente de Ligação")
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     for coluna in ("Retornou?", "Conseguiu Agendar?"):
         letra = _coluna_letra(cabecalho.index(coluna) + 1)
         intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
@@ -652,6 +672,7 @@ def configurar_validacao_status_puma() -> None:
     """
     cabecalho = _CABECALHOS_OPERACIONAL["Encaminhar pra Puma"]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Encaminhar pra Puma")
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     letra = _coluna_letra(cabecalho.index("Status") + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
     ws.add_validation(
@@ -761,6 +782,7 @@ def configurar_validacao_alertas() -> None:
     """
     cabecalho = _CABECALHOS_OPERACIONAL["Alertas"]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, "Alertas")
+    _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     letra = _coluna_letra(cabecalho.index("Ação") + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
     ws.add_validation(
