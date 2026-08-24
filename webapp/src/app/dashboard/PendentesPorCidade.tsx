@@ -14,7 +14,10 @@ export default function PendentesPorCidade({
   rodape?: ReactNode;
 }) {
   const [busca, setBusca] = useState("");
-  const filtrados = dados.filter((d) => d.cidade.toLowerCase().includes(busca.toLowerCase()));
+  const [ordem, setOrdem] = useState<"az" | "quantidade">("az");
+  const filtrados = dados
+    .filter((d) => d.cidade.toLowerCase().includes(busca.toLowerCase()))
+    .sort((a, b) => (ordem === "az" ? a.cidade.localeCompare(b.cidade, "pt-BR") : b.quantidade - a.quantidade));
   const total = dados.reduce((soma, d) => soma + d.quantidade, 0);
 
   return (
@@ -24,7 +27,24 @@ export default function PendentesPorCidade({
         {descricao && <InfoTooltip texto={descricao} label="Serviços pendentes por cidade" />}
       </h2>
       <div className="desc">
-        {dados.length} cidades · {total} pendências agora — ordem alfabética
+        {dados.length} cidades · {total} pendências agora — {ordem === "az" ? "ordem alfabética" : "maior para menor"}
+      </div>
+
+      <div className="no-print" style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <button
+          type="button"
+          className={ordem === "az" ? "btn primary small" : "btn small"}
+          onClick={() => setOrdem("az")}
+        >
+          A-Z
+        </button>
+        <button
+          type="button"
+          className={ordem === "quantidade" ? "btn primary small" : "btn small"}
+          onClick={() => setOrdem("quantidade")}
+        >
+          Maior → menor
+        </button>
       </div>
 
       <input
