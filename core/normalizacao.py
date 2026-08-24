@@ -10,12 +10,20 @@ Funções de normalização — puras, sem I/O, fáceis de testar isoladamente.
 
     validar_formato_placa(placa) -> bool
         Confere padrão antigo (ABC1234) ou Mercosul (ABC1D23) via regex.
+
+    formatar_data_br_sem_hora(valor) -> str
+        Normaliza qualquer formato de data já visto no pipeline (ISO com
+        hora/timezone do Supabase, BR com ou sem hora vindo da origem) pra
+        dd/mm/aaaa, sem hora.
 """
 
 import re
+from datetime import date, datetime
 
 _REGEX_PLACA_ANTIGA = re.compile(r"^[A-Z]{3}[0-9]{4}$")
 _REGEX_PLACA_MERCOSUL = re.compile(r"^[A-Z]{3}[0-9][A-Z][0-9]{2}$")
+
+_FORMATOS_DATA_BR = ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y")
 
 
 def normalizar_telefone_e164(telefone_bruto: str) -> dict:
@@ -95,3 +103,27 @@ def validar_formato_placa(placa: str) -> bool:
     """Confere padrão antigo (ABC1234) ou Mercosul (ABC1D23) via regex."""
     p = (placa or "").strip().upper()
     return bool(_REGEX_PLACA_ANTIGA.match(p) or _REGEX_PLACA_MERCOSUL.match(p))
+
+
+def formatar_data_br_sem_hora(valor) -> str:
+    """dd/mm/aaaa, sem hora, a partir de qualquer formato de data já visto
+    no pipeline: `date`/`datetime` nativo, BR com ou sem hora (origem dos
+    incidentes/contratos), ISO com timezone (colunas de timestamp do
+    Supabase). Texto que não bate com nenhum formato conhecido volta
+    inalterado — nunca lança exceção nem apaga um dado real por causa de um
+    formato de origem inesperado."""
+    if not valor:
+        return ""
+    if isinstance(valor, (date, datetime)):
+        return valor.strftime("%d/%m/%Y")
+
+    texto = str(valor).strip()
+    for formato in _FORMATOS_DATA_BR:
+        try:
+            return datetime.strptime(texto, formato).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(texto).strftime("%d/%m/%Y")
+    except ValueError:
+        return texto

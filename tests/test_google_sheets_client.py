@@ -109,8 +109,8 @@ def test_ler_aba_nao_filtra_fora_da_planilha_operacional(monkeypatch):
 
 
 def test_cabecalho_tratativas_tem_as_colunas_de_atendimento():
-    assert len(sheets.CABECALHO_TRATATIVAS) == 33
-    for coluna in ("Atendimento", "Base", "Ponto de Ação", "Retorno do Associado"):
+    assert len(sheets.CABECALHO_TRATATIVAS) == 34
+    for coluna in ("Atendimento", "Base", "Ponto de Ação", "Retorno do Associado", "Placa"):
         assert coluna in sheets.CABECALHO_TRATATIVAS
 
 
@@ -278,12 +278,12 @@ def test_configurar_formatacao_cabecalho_aplica_nas_5_abas(monkeypatch):
     # conferida coluna a coluna, não só via `_runs_por_cor` (evita teste
     # circular que só reafirmaria a própria implementação).
     assert fakes["Tratativas"].formats == [
-        ("A1:N1", _formato(False)),   # ID (hash) .. Dias sem contato
-        ("O1:S1", _formato(True)),    # Discrepância revisada .. Selecionado
-        ("T1:T1", _formato(False)),   # Status Contato
-        ("U1:U1", _formato(True)),    # Telefone corrigido
-        ("V1:AB1", _formato(False)),  # Status Sistema .. Retorno do Associado
-        ("AC1:AG1", _formato(True)),  # Situação Manual .. Finalizado
+        ("A1:O1", _formato(False)),   # ID (hash) .. Dias sem contato (inclui Placa)
+        ("P1:T1", _formato(True)),    # Discrepância revisada .. Selecionado
+        ("U1:U1", _formato(False)),   # Status Contato
+        ("V1:V1", _formato(True)),    # Telefone corrigido
+        ("W1:AC1", _formato(False)),  # Status Sistema .. Retorno do Associado
+        ("AD1:AH1", _formato(True)),  # Situação Manual .. Finalizado
     ]
     # Alertas: 2 runs (equipe é um bloco contíguo no fim)
     assert fakes["Alertas"].formats == [

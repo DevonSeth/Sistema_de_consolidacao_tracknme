@@ -14,39 +14,45 @@ class TestGerarChaveUnicaManutencao:
     def test_exemplo_confirmado_com_o_cliente(self):
         chave = gerar_chave_unica(
             ORIGEM_MANUTENCAO,
-            {
-                "placa": "XYZ9A87",
-                "data_incidente": "2026-07-26",
-                "evento": "Sem comunicação",
-            },
+            {"placa": "XYZ9A87", "evento": "Sem comunicação"},
         )
-        esperado = hashlib.sha256(
-            "manutencao|XYZ9A87|2026-07-26|Sem comunicação".encode()
-        ).hexdigest()[:16]
+        esperado = hashlib.sha256("manutencao|XYZ9A87|Sem comunicação".encode()).hexdigest()[:16]
         assert chave == esperado
 
     def test_tem_16_caracteres_hex(self):
-        chave = gerar_chave_unica(
-            ORIGEM_MANUTENCAO,
-            {"placa": "ABC1234", "data_incidente": "2026-01-01", "evento": "x"},
-        )
+        chave = gerar_chave_unica(ORIGEM_MANUTENCAO, {"placa": "ABC1234", "evento": "x"})
         assert len(chave) == 16
         int(chave, 16)  # não deve levantar ValueError
 
     def test_placa_e_normalizada_antes_de_entrar_na_chave(self):
         chave_com_traco = gerar_chave_unica(
-            ORIGEM_MANUTENCAO,
-            {"placa": "xyz-9a87", "data_incidente": "2026-07-26", "evento": "Sem comunicação"},
+            ORIGEM_MANUTENCAO, {"placa": "xyz-9a87", "evento": "Sem comunicação"}
         )
         chave_limpa = gerar_chave_unica(
-            ORIGEM_MANUTENCAO,
-            {"placa": "XYZ9A87", "data_incidente": "2026-07-26", "evento": "Sem comunicação"},
+            ORIGEM_MANUTENCAO, {"placa": "XYZ9A87", "evento": "Sem comunicação"}
         )
         assert chave_com_traco == chave_limpa
 
     def test_campo_faltando_levanta_key_error(self):
         with pytest.raises(KeyError):
             gerar_chave_unica(ORIGEM_MANUTENCAO, {"placa": "ABC1234"})
+
+    def test_data_incidente_nao_afeta_mais_a_chave(self):
+        """Achado 2026-08-24 (Bloco H): o Track N'Me atualiza `data_incidente`
+        periodicamente enquanto o incidente segue aberto — incluir esse campo
+        na chave mintava uma chave nova pro mesmo veículo/evento a cada
+        atualização, deixando a tratativa anterior órfã pra sempre. `dados`
+        pode trazer `data_incidente` (o resto do pipeline usa esse campo pra
+        exibição), mas ele não deve influenciar o hash."""
+        chave_1 = gerar_chave_unica(
+            ORIGEM_MANUTENCAO,
+            {"placa": "XYZ9A87", "evento": "Sem comunicação", "data_incidente": "2026-07-26 10:00:00"},
+        )
+        chave_2 = gerar_chave_unica(
+            ORIGEM_MANUTENCAO,
+            {"placa": "XYZ9A87", "evento": "Sem comunicação", "data_incidente": "2026-08-24 06:19:02"},
+        )
+        assert chave_1 == chave_2
 
 
 class TestGerarChaveUnicaInstalacaoRemocao:

@@ -1974,10 +1974,12 @@ def _chave(linha):
 
 
 def _preparar_mocks_publicar(
-    monkeypatch, linhas_sheet_antiga, estado_disparo_por_chave=None, situacao_manual_atual_por_chave=None
+    monkeypatch, linhas_sheet_antiga, estado_disparo_por_chave=None, situacao_manual_atual_por_chave=None,
+    tratativas_abertas_no_motor=None,
 ):
     estado_disparo_por_chave = estado_disparo_por_chave or {}
     situacao_manual_atual_por_chave = situacao_manual_atual_por_chave or {}
+    tratativas_abertas_no_motor = tratativas_abertas_no_motor or []
 
     def _ler_aba_fake(planilha, aba):
         return linhas_sheet_antiga
@@ -2009,6 +2011,9 @@ def _preparar_mocks_publicar(
     monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", _upsert_tratativas_em_lote_fake)
     monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", _sincronizar_fake)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", _buscar_estado_disparo_fake)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_tratativas_abertas_no_motor", lambda: tratativas_abertas_no_motor
+    )
     monkeypatch.setattr(
         orch.supabase_client,
         "buscar_situacao_manual_atual_por_chaves",
@@ -2321,6 +2326,7 @@ async def test_etapa_publicar_fila_operacional_falha_ao_reescrever_aba(monkeypat
     monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", lambda lista_dados: None)
     monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", lambda chave, campos: None)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", lambda chaves: {})
+    monkeypatch.setattr(orch.supabase_client, "buscar_tratativas_abertas_no_motor", lambda: [])
     monkeypatch.setattr(orch.supabase_client, "buscar_bases_ativas", lambda: [])
     monkeypatch.setattr(orch.supabase_client, "buscar_pontos_acao_ativos", lambda: [])
 
@@ -2532,11 +2538,12 @@ async def test_etapa_publicar_fila_operacional_upserta_data_referencia_com_dia_m
 
 
 @pytest.mark.asyncio
-async def test_etapa_publicar_fila_operacional_aba_tratativas_mantem_data_em_formato_br(monkeypatch):
-    """Guarda de não-regressão: a aba "Tratativas" recalcula a data direto
-    do dado fresco desta execução (`_data_referencia`, não passa pelos
-    helpers de conversão pro Supabase) — precisa continuar mostrando o
-    formato brasileiro original pro atendente, mesmo com o fix acima."""
+async def test_etapa_publicar_fila_operacional_aba_tratativas_data_sem_hora(monkeypatch):
+    """A aba "Tratativas" recalcula a data direto do dado fresco desta
+    execução (`_data_referencia`, não passa pelos helpers de conversão pro
+    Supabase) — normalização pedida pelo usuário (2026-08-21): dd/mm/aaaa
+    pro atendente, sem hora, mesmo quando a origem (Track N'Me) traz a data
+    do incidente com hora embutida."""
     linha = _linha_manutencao(data_incidente="20/08/2026 00:30:33")
     reescritas, _upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
 
@@ -2544,7 +2551,106 @@ async def test_etapa_publicar_fila_operacional_aba_tratativas_mantem_data_em_for
 
     assert resultado.sucesso is True
     _, _, linhas_escritas = reescritas[0]
-    assert linhas_escritas[0]["Data Contrato / Data Incidente"] == "20/08/2026 00:30:33"
+    assert linhas_escritas[0]["Data Contrato / Data Incidente"] == "20/08/2026"
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_aba_tratativas_coluna_placa(monkeypatch):
+    """Coluna "Placa" nova (pedido do usuário, 2026-08-21) — mesma regra de
+    resolução já usada na mensagem WhatsApp (`resolver_placa_para_mensagem`),
+    pra bater com o que o operador vê no template."""
+    linha_valida = _linha_manutencao(placa="ABC1234")
+    linha_ficticia = _linha_manutencao(placa="SGA0612", modelo="CG 160 FAN", chassi="CHASSI-M2")
+    linha_vazia = _linha_manutencao(placa="", chassi="CHASSI-M3")
+    reescritas, _upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+
+    resultado = await orch.etapa_publicar_fila_operacional([linha_valida, linha_ficticia, linha_vazia])
+
+    assert resultado.sucesso is True
+    _, _, linhas_escritas = reescritas[0]
+    assert linhas_escritas[0]["Placa"] == "ABC1234"
+    assert linhas_escritas[1]["Placa"] == "CG 160 FAN"
+    assert linhas_escritas[2]["Placa"] == "placa não cadastrada"
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_chave_manutencao_estavel_entre_rodadas(monkeypatch):
+    """Guarda de não-regressão do Bloco H (2026-08-24): o Track N'Me
+    atualiza `data_incidente` periodicamente enquanto o incidente segue
+    aberto — a chave de manutenção não pode mais depender desse campo,
+    senão a mesma pendência real vira uma linha nova (órfã) a cada
+    atualização. Mesma placa+evento em 2 rodadas com `data_incidente`
+    diferente precisa upsertar a MESMA `chave_unica`."""
+    upserts_por_rodada = []
+    for data_incidente in ("20/08/2026 13:04:04", "21/08/2026 06:19:02"):
+        linha = _linha_manutencao(data_incidente=data_incidente)
+        _reescritas, upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+        resultado = await orch.etapa_publicar_fila_operacional([linha])
+        assert resultado.sucesso is True
+        upserts_por_rodada.append(upserts[0]["chave_unica"])
+
+    assert upserts_por_rodada[0] == upserts_por_rodada[1]
+
+
+# --- _reconciliar_tratativas_ausentes (Bloco H, 2026-08-24: fechamento -----
+# automático geral quando uma tratativa some da fila do motor) -------------
+
+def _preparar_mock_reconciliar(monkeypatch, tratativas_abertas_no_motor):
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_tratativas_abertas_no_motor", lambda: tratativas_abertas_no_motor
+    )
+    syncs = []
+    monkeypatch.setattr(
+        orch.supabase_client, "sincronizar_campos_atendente",
+        lambda chave, campos: syncs.append((chave, campos)),
+    )
+    return syncs
+
+
+def test_reconciliar_tratativas_ausentes_presente_com_contador_zerado_nao_escreve(monkeypatch):
+    syncs = _preparar_mock_reconciliar(
+        monkeypatch, [{"chave_unica": "chave-1", "status": "pendente", "rodadas_ausente_fila": 0}]
+    )
+    orch._reconciliar_tratativas_ausentes({"chave-1"})
+    assert syncs == []
+
+
+def test_reconciliar_tratativas_ausentes_presente_reseta_contador(monkeypatch):
+    syncs = _preparar_mock_reconciliar(
+        monkeypatch, [{"chave_unica": "chave-1", "status": "pendente", "rodadas_ausente_fila": 1}]
+    )
+    orch._reconciliar_tratativas_ausentes({"chave-1"})
+    assert syncs == [("chave-1", {"rodadas_ausente_fila": 0})]
+
+
+def test_reconciliar_tratativas_ausentes_1a_rodada_so_incrementa_sem_fechar(monkeypatch):
+    syncs = _preparar_mock_reconciliar(
+        monkeypatch, [{"chave_unica": "chave-1", "status": "pendente", "rodadas_ausente_fila": 0}]
+    )
+    orch._reconciliar_tratativas_ausentes(set())
+    assert syncs == [("chave-1", {"rodadas_ausente_fila": 1})]
+
+
+def test_reconciliar_tratativas_ausentes_2a_rodada_fecha(monkeypatch):
+    syncs = _preparar_mock_reconciliar(
+        monkeypatch, [{"chave_unica": "chave-1", "status": "pendente", "rodadas_ausente_fila": 1}]
+    )
+    orch._reconciliar_tratativas_ausentes(set())
+    assert len(syncs) == 1
+    chave, campos = syncs[0]
+    assert chave == "chave-1"
+    assert campos["status"] == orch.STATUS_FINALIZADO
+    assert "2 rodadas reais consecutivas" in campos["observacao_sistema"]
+
+
+def test_reconciliar_tratativas_ausentes_respondido_nunca_fecha_sozinho(monkeypatch):
+    """Decisão do usuário (2026-08-24): resposta de cliente merece revisão
+    humana antes da tratativa desaparecer, mesmo ausente há várias rodadas."""
+    syncs = _preparar_mock_reconciliar(
+        monkeypatch, [{"chave_unica": "chave-1", "status": "respondido", "rodadas_ausente_fila": 5}]
+    )
+    orch._reconciliar_tratativas_ausentes(set())
+    assert syncs == []
 
 
 # --- etapa_sincronizar_atendente_tratativas (achado 2026-08-20: "Fase F ----

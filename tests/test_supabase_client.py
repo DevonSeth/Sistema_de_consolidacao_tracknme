@@ -37,6 +37,10 @@ class _QueryFalsa:
         self.filtros.append(("limit", a, k))
         return self
 
+    def range(self, inicio, fim):
+        self.filtros.append(("range", inicio, fim))
+        return self
+
     def in_(self, campo, valores):
         self.filtros.append(("in", campo, list(valores)))
         return self
@@ -627,7 +631,39 @@ def test_contar_pendencias_por_origem_filtra_status_fora_de_pendencia(monkeypatc
     sc.contar_pendencias_por_origem()
 
     selects = [c[2] for c in cliente.chamadas if c[0] == "select" and c[1] == "tratativas"]
-    assert selects == [[("not_in", "status", sc._STATUS_FORA_DE_PENDENCIA)]]
+    assert selects == [[("not_in", "status", sc._STATUS_FORA_DE_PENDENCIA), ("range", 0, 999)]]
+
+
+def test_contar_pendencias_por_origem_pagina_alem_de_1000_linhas(monkeypatch):
+    """Achado 2026-08-21 (mesma causa raiz do dashboard do cliente):
+    `select()` sem `.range()` trunca em 1.000 linhas silenciosamente —
+    confere que uma 1ª página cheia (1.000) busca a página seguinte."""
+    pagina_1 = [{"origem": "manutencao"} for _ in range(1000)]
+    pagina_2 = [{"origem": "instalacao"}, {"origem": "instalacao"}]
+    cliente = _ClienteFalso(retornos={"tratativas": [pagina_1, pagina_2]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    contagem = sc.contar_pendencias_por_origem()
+
+    assert contagem == {"manutencao": 1000, "instalacao": 2, "remocao": 0}
+    selects = [c[2] for c in cliente.chamadas if c[0] == "select" and c[1] == "tratativas"]
+    assert [f[-1] for f in selects] == [("range", 0, 999), ("range", 1000, 1999)]
+
+
+# --------------------------------------------------------------------------
+# buscar_tratativas_abertas_no_motor (Bloco H)
+# --------------------------------------------------------------------------
+
+def test_buscar_tratativas_abertas_no_motor_filtra_status_e_pagina(monkeypatch):
+    linhas_esperadas = [{"chave_unica": "chave-1", "status": "pendente", "rodadas_ausente_fila": 0}]
+    cliente = _ClienteFalso(retornos={"tratativas": [linhas_esperadas]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_tratativas_abertas_no_motor()
+
+    assert resultado == linhas_esperadas
+    selects = [c[2] for c in cliente.chamadas if c[0] == "select" and c[1] == "tratativas"]
+    assert selects == [[("not_in", "status", sc._STATUS_FORA_DA_FILA_MOTOR), ("range", 0, 999)]]
 
 
 # --------------------------------------------------------------------------
@@ -643,7 +679,7 @@ def test_buscar_tratativas_abertas_para_dashboard_operador_devolve_linhas_e_filt
 
     assert resultado == linhas_esperadas
     selects = [c[2] for c in cliente.chamadas if c[0] == "select" and c[1] == "tratativas"]
-    assert selects == [[("not_in", "status", sc._STATUS_FORA_DE_PENDENCIA)]]
+    assert selects == [[("not_in", "status", sc._STATUS_FORA_DE_PENDENCIA), ("range", 0, 999)]]
 
 
 # --------------------------------------------------------------------------

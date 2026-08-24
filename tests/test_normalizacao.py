@@ -1,4 +1,7 @@
+from datetime import date, datetime
+
 from core.normalizacao import (
+    formatar_data_br_sem_hora,
     normalizar_placa,
     normalizar_telefone_e164,
     validar_formato_placa,
@@ -84,3 +87,30 @@ class TestValidarFormatoPlaca:
     def test_vazio_ou_none(self):
         assert validar_formato_placa("") is False
         assert validar_formato_placa(None) is False
+
+
+class TestFormatarDataBrSemHora:
+    def test_string_br_com_hora(self):
+        assert formatar_data_br_sem_hora("01/08/2026 10:00:00") == "01/08/2026"
+
+    def test_string_br_sem_hora(self):
+        assert formatar_data_br_sem_hora("15/03/2025") == "15/03/2025"
+
+    def test_string_iso_com_timezone(self):
+        assert formatar_data_br_sem_hora("2026-08-15T14:32:00+00:00") == "15/08/2026"
+
+    def test_string_iso_sem_timezone(self):
+        assert formatar_data_br_sem_hora("2026-08-15T14:32:00") == "15/08/2026"
+
+    def test_date_nativo(self):
+        assert formatar_data_br_sem_hora(date(2026, 8, 15)) == "15/08/2026"
+
+    def test_datetime_nativo(self):
+        assert formatar_data_br_sem_hora(datetime(2026, 8, 15, 14, 32)) == "15/08/2026"
+
+    def test_vazio_ou_none(self):
+        assert formatar_data_br_sem_hora("") == ""
+        assert formatar_data_br_sem_hora(None) == ""
+
+    def test_texto_nao_reconhecido_volta_inalterado(self):
+        assert formatar_data_br_sem_hora("data inválida") == "data inválida"

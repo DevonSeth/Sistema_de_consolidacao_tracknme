@@ -1095,6 +1095,27 @@ def liberar_execucao_lock() -> None:
 
 _STATUS_FORA_DE_PENDENCIA = [STATUS_FINALIZADO, STATUS_ENCAMINHADO_PUMA]
 
+_TAMANHO_PAGINA_TRATATIVAS = 1000
+
+
+def _buscar_tratativas_paginado(construir_consulta, tamanho_pagina: int = _TAMANHO_PAGINA_TRATATIVAS) -> list[dict]:
+    """Pagina uma consulta em `tratativas` (achado 2026-08-21, mesma causa
+    raiz já corrigida no dashboard do cliente: `select()` sem `.range()`
+    trunca em 1.000 linhas silenciosamente, sem erro nenhum pra avisar).
+    `construir_consulta()` devolve o builder já com `.select()`/filtros
+    aplicados, faltando só `.range()`/`.execute()` (aplicados aqui, um novo
+    builder por página)."""
+    linhas = []
+    pagina = 0
+    while True:
+        inicio, fim = pagina * tamanho_pagina, (pagina + 1) * tamanho_pagina - 1
+        bloco = construir_consulta().range(inicio, fim).execute().data
+        linhas.extend(bloco)
+        if len(bloco) < tamanho_pagina:
+            break
+        pagina += 1
+    return linhas
+
 
 @retry_erro_transitorio_windows()
 def contar_pendencias_por_origem() -> dict:
@@ -1102,18 +1123,36 @@ def contar_pendencias_por_origem() -> dict:
     concluído), agrupada por origem — alimenta os 3 cards de resumo do
     Painel Operador (tela "Operação", Fase 4)."""
     client = get_client()
-    linhas = (
-        client.table("tratativas")
-        .select("origem")
-        .not_.in_("status", _STATUS_FORA_DE_PENDENCIA)
-        .execute()
-        .data
+    linhas = _buscar_tratativas_paginado(
+        lambda: client.table("tratativas").select("origem").not_.in_("status", _STATUS_FORA_DE_PENDENCIA)
     )
     contagem = {ORIGEM_MANUTENCAO: 0, ORIGEM_INSTALACAO: 0, ORIGEM_REMOCAO: 0}
     for linha in linhas:
         if linha.get("origem") in contagem:
             contagem[linha["origem"]] += 1
     return contagem
+
+
+# Status em que o motor (fila_operacional) segue responsável por regenerar a
+# tratativa a cada rodada real — fora daqui, a chave saiu do ciclo por um
+# motivo já tratado em outro lugar (ligação, Puma, ou já concluída), não por
+# ter "sumido" (`orchestrator.pipeline._reconciliar_tratativas_ausentes`,
+# Bloco H). Mesmos 3 valores de `_STATUS_RETORNO_TARDIO`, propósito diferente
+# — mantido como constante própria pra não acoplar 2 usos por coincidência.
+_STATUS_FORA_DA_FILA_MOTOR = [STATUS_AGUARDANDO_LIGACAO, STATUS_ENCAMINHADO_PUMA, STATUS_FINALIZADO]
+
+
+@retry_erro_transitorio_windows()
+def buscar_tratativas_abertas_no_motor() -> list[dict]:
+    """Todas as tratativas que o motor ainda é responsável por regenerar a
+    cada rodada real (`orchestrator.pipeline._reconciliar_tratativas_
+    ausentes`, Bloco H)."""
+    client = get_client()
+    return _buscar_tratativas_paginado(
+        lambda: client.table("tratativas")
+        .select("chave_unica, status, rodadas_ausente_fila")
+        .not_.in_("status", _STATUS_FORA_DA_FILA_MOTOR)
+    )
 
 
 _COLUNAS_DASHBOARD_OPERADOR = (
@@ -1129,10 +1168,8 @@ def buscar_tratativas_abertas_para_dashboard_operador() -> list[dict]:
     apoio" do Operador (`orchestrator.dashboards_operador.
     montar_dashboards_operador`) — evita um round-trip por widget."""
     client = get_client()
-    return (
-        client.table("tratativas")
+    return _buscar_tratativas_paginado(
+        lambda: client.table("tratativas")
         .select(_COLUNAS_DASHBOARD_OPERADOR)
         .not_.in_("status", _STATUS_FORA_DE_PENDENCIA)
-        .execute()
-        .data
     )

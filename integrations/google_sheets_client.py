@@ -151,7 +151,7 @@ _CABECALHOS_ADMINISTRADOR = {
 }
 
 CABECALHO_TRATATIVAS = [
-    "ID (hash)", "Tipo Serviço", "Identificador", "Chassi", "Cliente",
+    "ID (hash)", "Tipo Serviço", "Identificador", "Chassi", "Placa", "Cliente",
     "Telefone", "Cidade", "Bairro", "Data Contrato / Data Incidente", "SGA",
     "Ação Sugerida", "Observação do Sistema", "Nível de Urgência",
     "Dias sem contato",

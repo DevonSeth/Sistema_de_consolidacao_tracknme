@@ -2,7 +2,7 @@
 Geração da chave única de deduplicação — muda de fórmula por origem:
 
     Instalação/Remoção -> cpf + chassi + situacao + data_contrato
-    Manutenção          -> placa + data_incidente + evento
+    Manutenção          -> placa + evento
 
 `dados` já vem em snake_case (a conversão dos nomes de coluna em português
 da planilha para essas chaves acontece antes, no orchestrator — este módulo
@@ -14,13 +14,20 @@ hash sha256 truncado em 16 caracteres hex. Esse mesmo valor alimenta tanto
 `tratativas.chave_unica` no Supabase quanto a coluna "ID (hash)" da planilha
 Operacional — são o mesmo dado, dois lugares.
 
+Achado 2026-08-24: `data_incidente` (Track N'Me) já fez parte desta chave
+até este fix, mas o Track N'Me atualiza esse timestamp periodicamente
+enquanto o incidente segue aberto — cada atualização mintava uma chave nova
+pro mesmo veículo/evento, deixando a tratativa anterior órfã pra sempre
+(nada nunca a fechava). Removido do hash; `data_incidente` continua sendo
+exibido/persistido normalmente, só não entra mais no cálculo da chave (ver
+Bloco H, migração em `core/dedup.py`/`orchestrator/pipeline.py`).
+
 Exemplo (Manutenção):
     gerar_chave_unica("manutencao", {
         "placa": "XYZ9A87",
-        "data_incidente": "2026-07-26",
         "evento": "Sem comunicação",
     })
-    == sha256("manutencao|XYZ9A87|2026-07-26|Sem comunicação")[:16]
+    == sha256("manutencao|XYZ9A87|Sem comunicação")[:16]
 """
 
 import hashlib
@@ -34,7 +41,7 @@ TAMANHO_HASH = 16
 _CAMPOS_POR_ORIGEM = {
     ORIGEM_INSTALACAO: ["cpf", "chassi", "situacao", "data_contrato"],
     ORIGEM_REMOCAO: ["cpf", "chassi", "situacao", "data_contrato"],
-    ORIGEM_MANUTENCAO: ["placa", "data_incidente", "evento"],
+    ORIGEM_MANUTENCAO: ["placa", "evento"],
 }
 
 

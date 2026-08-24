@@ -90,7 +90,7 @@ from core.constants import (
     TIPO_IDENTIFICADOR_CHASSI,
     TIPO_IDENTIFICADOR_PLACA,
 )
-from core.normalizacao import normalizar_placa
+from core.normalizacao import formatar_data_br_sem_hora, normalizar_placa
 from config import manager
 from integrations import google_sheets_client, newmo_client, playwright_utils, sga_bot, supabase_client, tracknme_bot
 from integrations.retry_utils import ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS
@@ -1305,7 +1305,6 @@ def _dados_hash_chave_unica(linha: dict) -> dict:
     if linha.get("origem") == ORIGEM_MANUTENCAO:
         return {
             "placa": linha.get("placa", ""),
-            "data_incidente": linha.get("data_incidente", ""),
             "evento": linha.get("evento", ""),
         }
     return {
@@ -1407,11 +1406,12 @@ def _linha_para_aba(linha: dict, chave_unica: str, atendente: dict, estado_dispa
         "Tipo Serviço": _TIPO_SERVICO_LABEL.get(linha.get("origem", ""), linha.get("origem", "")),
         "Identificador": linha.get("identificador", ""),
         "Chassi": linha.get("chassi", ""),
+        "Placa": mensagens.resolver_placa_para_mensagem(linha.get("placa", ""), linha.get("modelo", "")),
         "Cliente": linha.get("cliente", ""),
         "Telefone": linha.get("telefone", ""),
         "Cidade": linha.get("cidade", ""),
         "Bairro": linha.get("bairro", ""),
-        "Data Contrato / Data Incidente": _data_referencia(linha),
+        "Data Contrato / Data Incidente": formatar_data_br_sem_hora(_data_referencia(linha)),
         "SGA": linha.get("sga", ""),
         "Ação Sugerida": linha.get("acao_sugerida", ""),
         "Observação do Sistema": linha.get("observacao_sistema", ""),
@@ -1429,10 +1429,10 @@ def _linha_para_aba(linha: dict, chave_unica: str, atendente: dict, estado_dispa
         "Tentativa 2": estado_disparo.get("tentativa_2") or "",
         "Tentativa 3": estado_disparo.get("tentativa_3") or "",
         "Resposta": estado_disparo.get("resposta") or "",
-        "Data Resposta": estado_disparo.get("data_resposta") or "",
+        "Data Resposta": formatar_data_br_sem_hora(estado_disparo.get("data_resposta")),
         "Retorno do Associado": estado_disparo.get("retorno_associado") or "",
         "Situação Manual": atendente["Situação Manual"],
-        "Data Agendada": atendente["Data Agendada"],
+        "Data Agendada": formatar_data_br_sem_hora(atendente["Data Agendada"]),
         "Técnico": atendente["Técnico"],
         "Observação Manual": atendente["Observação Manual"],
         "Finalizado": atendente["Finalizado"],
@@ -1457,6 +1457,43 @@ def _linha_divergencia_para_aba(linha: dict, chave_unica: str) -> dict:
         "Observação": linha.get("observacao", ""),
         "Ação": linha.get("acao", ""),
     }
+
+
+_LIMITE_RODADAS_AUSENTE_PARA_FECHAR = 2
+
+
+def _reconciliar_tratativas_ausentes(chaves_desta_rodada: set[str]) -> None:
+    """Fecha sozinha uma tratativa que sumiu da fila do motor por 2 rodadas
+    reais consecutivas (Bloco H, 2026-08-24 — achado original: chave de
+    manutenção instável, mas este mecanismo cobre qualquer origem/causa
+    futura de "sumiço"). Mesmo espírito de `_puma_concluido_automaticamente`
+    (reler o estado atual e sincronizar de volta sem exigir ação humana),
+    generalizado. `status='respondido'` nunca fecha sozinho — decisão do
+    usuário: uma resposta de cliente merece revisão humana antes de a
+    tratativa desaparecer."""
+    for tratativa in supabase_client.buscar_tratativas_abertas_no_motor():
+        chave = tratativa["chave_unica"]
+        rodadas_atual = tratativa.get("rodadas_ausente_fila") or 0
+
+        if chave in chaves_desta_rodada:
+            if rodadas_atual != 0:
+                supabase_client.sincronizar_campos_atendente(chave, {"rodadas_ausente_fila": 0})
+            continue
+
+        if tratativa.get("status") == STATUS_RESPONDIDO:
+            continue
+
+        rodadas_nova = rodadas_atual + 1
+        if rodadas_nova >= _LIMITE_RODADAS_AUSENTE_PARA_FECHAR:
+            supabase_client.sincronizar_campos_atendente(chave, {
+                "status": STATUS_FINALIZADO,
+                "observacao_sistema": (
+                    "Encerrado automaticamente: ausente da fila do motor por "
+                    f"{rodadas_nova} rodadas reais consecutivas."
+                ),
+            })
+        else:
+            supabase_client.sincronizar_campos_atendente(chave, {"rodadas_ausente_fila": rodadas_nova})
 
 
 async def etapa_publicar_fila_operacional(
@@ -1558,6 +1595,13 @@ async def etapa_publicar_fila_operacional(
             google_sheets_client.reescrever_aba(
                 google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Instalação", linhas_divergencia
             )
+
+        # Depois das escritas principais (Sheets/Supabase já refletem esta
+        # rodada) — uma falha aqui (ex: coluna `rodadas_ausente_fila` ainda
+        # não criada, ver `_handoff/sql_tratativas_rodadas_ausente_fila.sql`)
+        # não deve impedir o operador de ver o resultado da publicação.
+        with _anotar_erro("reconciliar_tratativas_ausentes"):
+            _reconciliar_tratativas_ausentes({chave_unica for _, chave_unica in linhas_com_chave})
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
         return ResultadoEtapa("publicar_fila_operacional", sucesso=False, mensagem=_mensagem_com_notas(e))
 
