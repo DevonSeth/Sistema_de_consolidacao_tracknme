@@ -705,15 +705,15 @@ def _situacoes_veiculo_sga_recentes(
 def _formatar_situacoes_recentes(recentes: dict[str, dict]) -> dict[str, dict]:
     """`situacoes_veiculo_sga` (linha crua do Supabase) -> mesmo formato de
     `_persistir_situacoes_sga` ({status, desde, cidade, bairro,
-    encontrado_via}) — cidade/bairro nunca são persistidos (só existem no
-    retorno ao vivo de `sga_bot.consultar_situacao`), por isso ficam
-    vazios pra quem foi pulado pelo checkpoint."""
+    encontrado_via}). Cidade/bairro (Bloco C1, 2026-08-24) já vêm
+    persistidos no checkpoint — `.get(..., "")` só cobre linha antiga
+    gravada antes deste fix, sem esses campos ainda."""
     return {
         chave: {
             "status": registro.get("status"),
             "desde": registro.get("desde"),
-            "cidade": "",
-            "bairro": "",
+            "cidade": registro.get("cidade", ""),
+            "bairro": registro.get("bairro", ""),
             "encontrado_via": registro.get("encontrado_via"),
         }
         for chave, registro in recentes.items()
@@ -752,6 +752,7 @@ def _persistir_situacoes_sga(resultados: list, agora: datetime) -> tuple[dict, l
         atualizados[chassi] = motor_regras_instalacao_remocao.atualizar_situacao_sga(
             chassi, r.resultado["status"], anteriores.get(chassi), agora,
             encontrado_via=r.resultado.get("encontrado_via"),
+            cidade=r.resultado.get("cidade", ""), bairro=r.resultado.get("bairro", ""),
         )
 
     falhas_persistencia: list[dict] = []
@@ -1664,6 +1665,7 @@ def etapa_disparo_mensagens(
         pontos_acao_por_id = {p["id"]: p for p in supabase_client.buscar_pontos_acao_ativos()}
 
         enviadas = contatos_invalidos = falhas = 0
+        sem_atendimento: list[dict] = []
         total_elegiveis = len(elegiveis)
         for indice, tratativa in enumerate(elegiveis):
             if cancelar_checker is not None and cancelar_checker():
@@ -1673,6 +1675,7 @@ def etapa_disparo_mensagens(
                     dados={
                         "enviadas": enviadas, "contato_invalido": contatos_invalidos,
                         "falhas": falhas, "total_elegiveis": total_elegiveis,
+                        "sem_atendimento": sem_atendimento,
                     },
                     cancelado={"pendentes": elegiveis[indice:]},
                 )
@@ -1680,6 +1683,15 @@ def etapa_disparo_mensagens(
                 on_progresso(indice + 1, total_elegiveis)
             atendimento = tratativa.get("atendimento")
             if not atendimento:
+                # Achado 2026-08-21 (Bloco E2): "Selecionado" marcado sem
+                # "Atendimento" preenchido pulava em silêncio -- o atendente
+                # não tinha como saber que a mensagem nunca ia sair sem
+                # investigar (dados["falhas"] só cobre falha de ENVIO, não
+                # item incompleto que nunca chegou a tentar enviar).
+                sem_atendimento.append({
+                    "item": tratativa.get("chave_unica"), "erro": "Atendimento não preenchido",
+                    "descricao": f"{tratativa.get('cliente', '')} ({tratativa.get('identificador', '')})",
+                })
                 continue
             if (tratativa.get("retorno_associado") or "").strip():
                 continue
@@ -1720,6 +1732,7 @@ def etapa_disparo_mensagens(
         dados={
             "enviadas": enviadas, "contato_invalido": contatos_invalidos,
             "falhas": falhas, "total_elegiveis": len(elegiveis),
+            "sem_atendimento": sem_atendimento,
         },
     )
 

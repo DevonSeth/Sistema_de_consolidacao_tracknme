@@ -1031,15 +1031,70 @@ async def test_etapa_fechar_incidentes_automaticos_kill_switch_desligado_nunca_u
     assert "tracknme_http_abortado" not in resultado.dados
 
 
+# --- _persistir_situacoes_sga / _formatar_situacoes_recentes (Bloco C1, ----
+# 2026-08-24: cidade/bairro do SGA persistidos no checkpoint) --------------
+
+def test_persistir_situacoes_sga_inclui_cidade_bairro_no_payload_de_upsert(monkeypatch):
+    """Antes deste fix, o payload de `upsert_situacoes_veiculo_sga_em_lote`
+    não levava cidade/bairro (só o dict de uso imediato desta execução
+    tinha) — uma tratativa que reaproveitasse o checkpoint ficava sem
+    esse dado."""
+    monkeypatch.setattr(orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote", lambda chassis: {})
+    persistido = []
+    monkeypatch.setattr(
+        orch.supabase_client, "upsert_situacoes_veiculo_sga_em_lote",
+        lambda registros: persistido.extend(registros),
+    )
+    resultados = [
+        orch.playwright_utils.ResultadoItem(
+            item="CHASSI-1", sucesso=True,
+            resultado={"status": "ATIVO", "cidade": "Recife", "bairro": "Boa Vista", "encontrado_via": "chassi"},
+        )
+    ]
+
+    situacoes_sga, falhas = orch._persistir_situacoes_sga(resultados, agora=datetime(2026, 8, 24, 10, 0, 0))
+
+    assert falhas == []
+    assert persistido == [{
+        "chassi": "CHASSI-1", "status": "ATIVO", "desde": datetime(2026, 8, 24, 10, 0, 0),
+        "atualizado_em": datetime(2026, 8, 24, 10, 0, 0), "encontrado_via": "chassi",
+        "cidade": "Recife", "bairro": "Boa Vista",
+    }]
+    assert situacoes_sga["CHASSI-1"]["cidade"] == "Recife"
+    assert situacoes_sga["CHASSI-1"]["bairro"] == "Boa Vista"
+
+
+def test_formatar_situacoes_recentes_devolve_cidade_bairro_do_checkpoint():
+    recentes = {
+        "CHASSI-1": {"status": "ATIVO", "desde": "2026-08-20", "cidade": "Recife", "bairro": "Boa Vista", "encontrado_via": "chassi"},
+    }
+
+    formatado = orch._formatar_situacoes_recentes(recentes)
+
+    assert formatado["CHASSI-1"]["cidade"] == "Recife"
+    assert formatado["CHASSI-1"]["bairro"] == "Boa Vista"
+
+
+def test_formatar_situacoes_recentes_registro_antigo_sem_cidade_bairro_cai_em_vazio():
+    """Linha gravada antes do Bloco C1 (sem as colunas ainda preenchidas)
+    não pode quebrar — cai em string vazia, mesmo comportamento de antes."""
+    recentes = {"CHASSI-1": {"status": "ATIVO", "desde": "2026-08-20", "encontrado_via": "chassi"}}
+
+    formatado = orch._formatar_situacoes_recentes(recentes)
+
+    assert formatado["CHASSI-1"]["cidade"] == ""
+    assert formatado["CHASSI-1"]["bairro"] == ""
+
+
 # --- etapa_enriquecimento_sga ------------------------------------------------
 
 _INSTALACAO_REMOCAO_FAKE = [{"Chassi": "chassi-ir-1", "Serviço": "Instalação"}]
 
 
-def _atualizar_situacao_sga_fake(chassi, status_novo, anterior, agora, encontrado_via=None):
+def _atualizar_situacao_sga_fake(chassi, status_novo, anterior, agora, encontrado_via=None, cidade="", bairro=""):
     return {
         "chassi": chassi, "status": status_novo, "desde": agora, "atualizado_em": agora,
-        "encontrado_via": encontrado_via,
+        "encontrado_via": encontrado_via, "cidade": cidade, "bairro": bairro,
     }
 
 
@@ -2807,7 +2862,9 @@ def test_etapa_disparo_mensagens_sucesso_atualiza_apos_envio(monkeypatch):
     resultado = orch.etapa_disparo_mensagens([_tratativa_disparo()], agora=_AGORA_DIA_UTIL)
 
     assert resultado.sucesso is True
-    assert resultado.dados == {"enviadas": 1, "contato_invalido": 0, "falhas": 0, "total_elegiveis": 1}
+    assert resultado.dados == {
+        "enviadas": 1, "contato_invalido": 0, "falhas": 0, "total_elegiveis": 1, "sem_atendimento": [],
+    }
     assert len(chamadas_envio) == 1
     assert chamadas_envio[0]["destinatario"] == "+5581987654321"
     assert chamadas_envio[0]["codigo"] == 1001
@@ -2820,7 +2877,9 @@ def test_etapa_disparo_mensagens_contato_invalido_nao_consome_tentativa(monkeypa
 
     resultado = orch.etapa_disparo_mensagens([_tratativa_disparo()], agora=_AGORA_DIA_UTIL)
 
-    assert resultado.dados == {"enviadas": 0, "contato_invalido": 1, "falhas": 0, "total_elegiveis": 1}
+    assert resultado.dados == {
+        "enviadas": 0, "contato_invalido": 1, "falhas": 0, "total_elegiveis": 1, "sem_atendimento": [],
+    }
     assert chamadas_invalido == ["tratativa-1"]
     assert chamadas_atualizar == []
 
@@ -2861,7 +2920,9 @@ def test_etapa_disparo_mensagens_falha_temporaria_nao_grava_nada(monkeypatch):
 
     resultado = orch.etapa_disparo_mensagens([_tratativa_disparo()], agora=_AGORA_DIA_UTIL)
 
-    assert resultado.dados == {"enviadas": 0, "contato_invalido": 0, "falhas": 1, "total_elegiveis": 1}
+    assert resultado.dados == {
+        "enviadas": 0, "contato_invalido": 0, "falhas": 1, "total_elegiveis": 1, "sem_atendimento": [],
+    }
     assert chamadas_atualizar == []
     assert chamadas_invalido == []
 
@@ -2877,7 +2938,9 @@ def test_etapa_disparo_mensagens_excecao_de_transporte_conta_como_falha_sem_derr
     )
 
     assert resultado.sucesso is True
-    assert resultado.dados == {"enviadas": 0, "contato_invalido": 0, "falhas": 2, "total_elegiveis": 2}
+    assert resultado.dados == {
+        "enviadas": 0, "contato_invalido": 0, "falhas": 2, "total_elegiveis": 2, "sem_atendimento": [],
+    }
     assert len(chamadas_envio) == 2  # o 2º item foi tentado mesmo o 1º tendo estourado
 
 
@@ -2888,6 +2951,23 @@ def test_etapa_disparo_mensagens_sem_atendimento_pula(monkeypatch):
 
     assert resultado.dados["enviadas"] == 0
     assert chamadas_envio == []
+
+
+def test_etapa_disparo_mensagens_sem_atendimento_registra_aviso_em_vez_de_silencio(monkeypatch):
+    """Bloco E2 (2026-08-24): antes, "Selecionado" sem "Atendimento" pulava
+    em silêncio total — agora aparece em `dados["sem_atendimento"]` (mesmo
+    espírito de `dados["falhas"]`, só que pra dado incompleto, não falha
+    de envio)."""
+    _preparar_mocks_disparo(monkeypatch)
+
+    resultado = orch.etapa_disparo_mensagens(
+        [_tratativa_disparo(chave_unica="chave-1", cliente="Fulano", identificador="CHASSI-1", atendimento="")],
+        agora=_AGORA_DIA_UTIL,
+    )
+
+    assert resultado.dados["sem_atendimento"] == [{
+        "item": "chave-1", "erro": "Atendimento não preenchido", "descricao": "Fulano (CHASSI-1)",
+    }]
 
 
 def test_etapa_disparo_mensagens_retorno_associado_pendente_pula(monkeypatch):

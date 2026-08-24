@@ -260,6 +260,14 @@ class Api:
                         "falhas_item": (
                             resultado.dados.get("falhas") if resultado is not None and resultado.dados else None
                         ),
+                        # Selecionado sem Atendimento definido (Bloco E2,
+                        # 2026-08-24) — antes pulava em silêncio na Fase F.1;
+                        # mesmo princípio de `falhas_item` (aparece mesmo com
+                        # a etapa em sucesso), mas é aviso de dado incompleto,
+                        # não falha de envio.
+                        "sem_atendimento_item": (
+                            resultado.dados.get("sem_atendimento") if resultado is not None and resultado.dados else None
+                        ),
                     }
                 )
         contagem = supabase_client.contar_pendencias_por_origem()

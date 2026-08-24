@@ -245,13 +245,32 @@ async def _extrair_campo_correspondencia(page: Page, seletor: str) -> str:
 TAMANHO_MINIMO_HTML_VALIDO = 10_000
 
 MAPA_STATUS_SGA_CODIGO = {
+    # Legenda completa (Bloco C2, 2026-08-24) -- extraída ao vivo das opções
+    # do dropdown #cmbSituacaoVeiculo (só o caminho Playwright consegue: o
+    # HTTP só traz o código numérico cru via JS inline, nunca o texto). Login
+    # manual no SGA, 1 veículo qualquer, `el.options` inteiro (não só o
+    # selecionado) -- revela a legenda toda de uma vez, independente de qual
+    # veículo tem qual status.
     "1": STATUS_SGA_ATIVO,
+    "2": "INATIVO",
+    "3": "PENDENTE",
+    "4": "INADIMPLENTE",
+    "5": "NEGADO",
+    "6": "SUBSTITUIÇÃO (INATIVO)",
+    "7": "MIGRADO PARA 4394",
+    "8": "ORDEM DE RETIRADA",
+    "9": "INATIVO/INDENIZAÇÃO",
+    "10": "TENTATIVA DE FRAUDE",
+    "11": "SINISTRO - FURTO/ROUBO",
+    "12": "SINISTRO - PT",
+    "13": "SINISTRO - NÃO COBRAR (INATIVO)",
+    "14": "PROCESSO JUDICIAL",
+    "15": "CANCELADO",
+    "16": "SUBSTITUIÇÃO",
+    "17": "PENDENTE CADASTRO",
+    "18": "PENDENTE VIDEO",
     "19": "CANCELADO POR SUBSTITUIÇÃO",
     "20": "INADIMPLENTE VIDEO",
-    # Vistos em produção sem label confirmado ainda (código existe, texto
-    # não foi cruzado contra o navegador) -- 2, 11, 12, 15, 18. Adicionar
-    # aqui assim que confirmado; até lá, `_label_status` degrada com
-    # segurança (nunca é confundido com ATIVO/NÃO ENCONTRADO, ver docstring).
 }
 
 
@@ -302,10 +321,12 @@ def _label_status(codigo: str) -> str:
     """Traduz o código numérico do status pro texto que o resto do sistema
     já espera (`core.motor_regras.aplicar_situacoes_sga` só compara contra
     `STATUS_SGA_ATIVO`/`STATUS_SGA_NAO_ENCONTRADO` -- qualquer outro texto
-    já cai corretamente em "REGRA_SGA_INATIVO"). Código sem label
-    confirmado ainda NUNCA é confundido com ATIVO/NÃO ENCONTRADO -- só
-    fica menos legível na mensagem até alguém completar `MAPA_STATUS_SGA_
-    CODIGO`, mas a decisão de negócio permanece correta."""
+    já cai corretamente em "REGRA_SGA_INATIVO"). `MAPA_STATUS_SGA_CODIGO`
+    tem a legenda completa (20 códigos, extraída ao vivo do dropdown do
+    SGA, Bloco C2 2026-08-24) -- um código NOVO que o SGA venha a criar no
+    futuro cai aqui, sem label, mas NUNCA é confundido com ATIVO/NÃO
+    ENCONTRADO -- só fica menos legível na mensagem, a decisão de negócio
+    permanece correta."""
     if codigo in MAPA_STATUS_SGA_CODIGO:
         return MAPA_STATUS_SGA_CODIGO[codigo]
     return f"DESCONHECIDO (código {codigo})"

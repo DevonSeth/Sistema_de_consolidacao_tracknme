@@ -158,6 +158,21 @@ function renderizarCard(etapa) {
     card.appendChild(bloco);
   }
 
+  // Selecionado sem Atendimento definido (Bloco E2) — aviso de dado
+  // incompleto, não falha de envio (por isso um bloco/cor separados de
+  // .card-etapa-falhas).
+  if (etapa.sem_atendimento_item && etapa.sem_atendimento_item.length > 0) {
+    const blocoAviso = document.createElement("div");
+    blocoAviso.className = "card-etapa-sem-atendimento";
+    etapa.sem_atendimento_item.forEach((item) => {
+      const linha = document.createElement("div");
+      linha.className = "card-etapa-sem-atendimento-item";
+      linha.textContent = `${item.descricao ?? "Item"} — ${item.erro ?? "Atendimento não preenchido"}`;
+      blocoAviso.appendChild(linha);
+    });
+    card.appendChild(blocoAviso);
+  }
+
   return card;
 }
 

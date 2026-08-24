@@ -301,11 +301,22 @@ class TestAtualizarSituacaoSga:
         assert resultado == {
             "chassi": "CHASSI-001", "status": "INATIVO", "desde": self.AGORA,
             "atualizado_em": self.AGORA, "encontrado_via": None,
+            "cidade": "", "bairro": "",
         }
 
     def test_encontrado_via_e_repassado_sem_afetar_desde(self):
         resultado = atualizar_situacao_sga("CHASSI-001", "INATIVO", None, self.AGORA, encontrado_via="placa")
         assert resultado["encontrado_via"] == "placa"
+        assert resultado["desde"] == self.AGORA
+
+    def test_cidade_bairro_sao_repassados_sem_afetar_desde(self):
+        """Bloco C1 (2026-08-24): cidade/bairro agora persistidos no
+        checkpoint, mesmo padrão de `encontrado_via` — só repassados."""
+        resultado = atualizar_situacao_sga(
+            "CHASSI-001", "INATIVO", None, self.AGORA, cidade="Recife", bairro="Boa Vista"
+        )
+        assert resultado["cidade"] == "Recife"
+        assert resultado["bairro"] == "Boa Vista"
         assert resultado["desde"] == self.AGORA
 
     def test_status_mudou_reinicia_a_contagem(self):

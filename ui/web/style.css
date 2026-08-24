@@ -561,6 +561,12 @@ body {
 .card-etapa-falhas { margin-top: 9px; max-height: 260px; overflow-y: auto; }
 .card-etapa-falhas-item { font-size: 12px; color: var(--status-erro-fg); margin-top: 2px; }
 
+/* Selecionado sem Atendimento definido (Bloco E2) — mesmo layout de
+   .card-etapa-falhas, mas cor de aviso (não é falha de envio, é dado
+   incompleto que nunca chegou a tentar enviar). */
+.card-etapa-sem-atendimento { margin-top: 9px; max-height: 260px; overflow-y: auto; }
+.card-etapa-sem-atendimento-item { font-size: 12px; color: var(--status-aguardando-fg); margin-top: 2px; }
+
 .rodape-creditos { margin-top: 32px; padding-top: 14px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text-faint); }
 
 .legenda {

@@ -147,6 +147,25 @@ class TestLabelStatus:
         assert label != STATUS_SGA_NAO_ENCONTRADO
         assert "999" in label
 
+    @pytest.mark.parametrize(
+        "codigo,label_esperado",
+        [
+            ("2", "INATIVO"),
+            ("3", "PENDENTE"),
+            ("4", "INADIMPLENTE"),
+            ("11", "SINISTRO - FURTO/ROUBO"),
+            ("15", "CANCELADO"),
+        ],
+    )
+    def test_codigos_vistos_em_producao_agora_tem_label_confirmado(self, codigo, label_esperado):
+        """Bloco C2 (2026-08-24): códigos vistos em produção sem label
+        confirmado (113 de 1.840 tratativas numa rodada real) — legenda
+        completa extraída ao vivo do dropdown do SGA."""
+        assert sga_bot._label_status(codigo) == label_esperado
+
+    def test_mapa_status_sga_codigo_tem_a_legenda_completa(self):
+        assert len(sga_bot.MAPA_STATUS_SGA_CODIGO) == 20
+
 
 class _RespostaFake:
     def __init__(self, status=200, url="", corpo=b""):
