@@ -210,14 +210,13 @@ dias)** — não precisa esperar chegar em "Crítico" sozinho.
 - **Nível de urgência: 5** (a mais alta, reservada exatamente pra esse
   cruzamento).
 
-### REGRA_TITULARIDADE — troca de titularidade (fechada, 2026-08-06)
+### REGRA_TITULARIDADE — troca de titularidade (fechada, 2026-08-06; destino mudou no Bloco B, 2026-08-24)
 
 Quando o chassi da linha **já é encontrado** em "Rastreadores Ativos"
 (instalação confirmada como executada) **e** o nome do cliente diverge
 entre as duas fontes — `Nome Associado` (aba Instalação-Remoção) vs.
 `Cliente` (aba Rastreadores Ativos, mesmo chassi) — sinaliza troca de
-titularidade. Ação puramente manual: o atendente verifica e corrige o
-cadastro, não tem correção automática.
+titularidade.
 
 Não compete com `REGRA_PRAZO`/`REGRA_RISCO`/`REGRA_PRAZO_E_RISCO` —
 essas só valem **enquanto a instalação ainda está pendente** (chassi
@@ -225,9 +224,15 @@ não encontrado); `REGRA_TITULARIDADE` só dispara depois que a
 instalação já foi confirmada. Não há sobreposição/precedência a
 resolver entre elas.
 
-- **Nível de urgência: 2** — mesmo nível de `REGRA_ALERTA_CLIENTE`
-  (equivalente em Manutenção: troca de nome do associado). Não é
-  emergência de contato, mas evita deixar o cadastro desatualizado.
+**Bloco B (2026-08-24)**: deixou de virar tratativa/entrar em
+"Tratativas" — vai pra aba "Análise de Divergência - Instalação" (mesmo
+destino de `REGRA_INSTALACAO_JA_FEITA`, motivo "Titularidade
+divergente"), lado a lado com o `codigo_regra` original. Ação continua
+puramente manual (o atendente verifica e corrige o cadastro), só o
+destino/apresentação mudou — deixou de competir na esteira de
+prioridade de atendimento por ser mais aviso administrativo que
+atendimento ao associado. **Sem nível de urgência** a partir de agora
+(não compete mais na esteira; o nível 2 antigo deixou de se aplicar).
 
 ### REGRA_INSTALACAO_JA_FEITA — instalação esquecida no cadastro (fechada, 2026-08-13)
 
@@ -367,7 +372,67 @@ veículo — o atendente verifica a titularidade antes de agir.
 também vem sempre dos dias desde `INATIVO` (3 variantes `_NORMAL`/
 `_ALTA`/`_URGENTE`), não um nível 2 fixo.
 
-## Tabela final consolidada — 16 códigos de `rule_templates` (atualizado 2026-08-13)
+**Bloco B (2026-08-24)**: deixou de virar tratativa/entrar em
+"Tratativas" — vai pra aba nova "Análise de Divergência - Remoção"
+(motivo "Titularidade divergente"). Tem precedência sobre o filtro de
+modelo abaixo (decisão fechada): se titularidade diverge, o motivo que
+aparece é sempre titularidade, mesmo que o modelo do equipamento também
+não esteja na lista permitida. **Sem nível de urgência** a partir de
+agora (não compete mais na esteira).
+
+### REGRA_REMOCAO_SGA_ATIVO — SGA ainda confirma ATIVO (Bloco B, 2026-08-24)
+
+Antes, qualquer status do SGA diferente de `INATIVO` (incluindo `ATIVO`)
+fazia `_classificar_remocao` descartar a linha em silêncio — nenhuma
+tratativa, nenhum aviso, a pendência de remoção simplesmente não
+"nascia" ainda. Achado da revisão do motor de regras: isso escondia do
+atendente uma remoção pendente cujo veículo o SGA ainda confirma
+`ATIVO` de verdade (não é ausência de dado, é confirmação positiva do
+contrário do que a remoção pressupõe).
+
+Agora, especificamente quando o status é **literalmente `ATIVO`**
+(`STATUS_SGA_ATIVO`, não qualquer não-`INATIVO`), gera uma linha na aba
+"Análise de Divergência - Remoção" em vez de descartar — sinaliza que a
+remoção pendente pode estar desatualizada e pede confirmação manual no
+SGA antes de prosseguir. Qualquer outro status (nem `ATIVO` nem
+`INATIVO`) continua descartado em silêncio, sem mudança.
+
+- **Sem nível de urgência** — divergência pura, mesmo espírito de
+  `REGRA_INSTALACAO_JA_FEITA`, não compete na esteira de prioridade.
+
+### REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO — modelo de equipamento fora da lista permitida (Bloco B, 2026-08-24)
+
+Achado crítico ao desenhar esta regra: existem **2 colunas "Modelo"**
+em "Rastreadores Ativos" — a posição 13 (`Modelo do VEÍCULO`, ex. "CG
+160 FAN FLEX", já usada pelo critério de risco de Instalação) e a
+posição 2 (`Modelo do EQUIPAMENTO/rastreador`, ex. "J16"), que nenhuma
+regra usava até aqui. Esta regra é a primeira a ler a posição 2.
+
+Uma remoção só vira tratativa (`REGRA_REMOCAO_PRAZO_*`/`REGRA_REMOCAO_
+ATIVA_*`) se o modelo do equipamento estiver numa lista permitida,
+configurável no Admin (`system_parameters.modelos_removiveis`, CSV de
+substrings — mesmo formato de `modelos_alto_risco_furto`, mas lista
+própria, exclusiva de Remoção). O filtro roda **depois** da
+classificação normal (prazo/titularidade) — redireciona o destino final,
+nunca bloqueia essa avaliação.
+
+Decisões fechadas com o usuário sobre os casos-limite:
+- **Lista vazia/não configurada**: bloqueia tudo até o Admin configurar
+  — nenhuma remoção vira tratativa nesse meio-tempo, todas caem aqui.
+- **Chassi não encontrado em Rastreadores Ativos** (`REGRA_REMOCAO_
+  PRAZO_*`, situação normal/esperada de remoção): não há equipamento pra
+  ler o modelo, então também bloqueia — sem confirmação do modelo, vai
+  pra divergência do mesmo jeito que um modelo fora da lista. Na
+  prática, `REGRA_REMOCAO_PRAZO_*` nunca chega a virar tratativa de
+  fato enquanto essa lista não cobrir "sem equipamento" de alguma forma
+  — é o comportamento pretendido, não um bug.
+- **Titularidade divergente ao mesmo tempo**: titularidade sempre vence
+  (ver `REGRA_REMOCAO_TITULARIDADE` acima).
+
+- **Sem nível de urgência** — divergência pura, mesmo espírito das
+  demais regras desta família.
+
+## Tabela final consolidada — 18 códigos de `rule_templates` (atualizado 2026-08-24, Bloco B)
 
 Implementados em `core/motor_regras_instalacao_remocao.py`. A cascata em
 código só decide o **sufixo de tier** por dias — o nível sempre vem da
@@ -383,10 +448,14 @@ Ativos, exceto `REGRA_TITULARIDADE`/`REGRA_INSTALACAO_JA_FEITA`):
 | `REGRA_PRAZO_CRITICO` | 4 |
 | `REGRA_RISCO` | 4 |
 | `REGRA_PRAZO_E_RISCO` | 5 |
-| `REGRA_TITULARIDADE` (chassi já encontrado + nome diverge) | 2 |
+| `REGRA_TITULARIDADE` (chassi já encontrado + nome diverge) | — (Bloco B, 2026-08-24: aba "Análise de Divergência - Instalação", não compete mais na esteira) |
 | `REGRA_INSTALACAO_JA_FEITA` (chassi já encontrado + nome bate) | — (aba própria, não compete na esteira de urgência — ver seção acima) |
 
-**Remoção** (só depois do gating por SGA `INATIVO`, ver seção acima):
+**Remoção** (só depois do gating por SGA `INATIVO`/`ATIVO`, ver seção
+acima; `REGRA_REMOCAO_PRAZO_*`/`REGRA_REMOCAO_ATIVA_*` só chegam a virar
+tratativa se o modelo do equipamento passar no filtro de
+`modelos_removiveis`, ver `REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`
+abaixo):
 
 | codigo_regra | nível |
 |---|---|
@@ -396,9 +465,11 @@ Ativos, exceto `REGRA_TITULARIDADE`/`REGRA_INSTALACAO_JA_FEITA`):
 | `REGRA_REMOCAO_ATIVA_NORMAL` | 1 |
 | `REGRA_REMOCAO_ATIVA_ALTA` | 3 |
 | `REGRA_REMOCAO_ATIVA_URGENTE` | 5 |
-| `REGRA_REMOCAO_TITULARIDADE_NORMAL` | 1 |
-| `REGRA_REMOCAO_TITULARIDADE_ALTA` | 3 |
-| `REGRA_REMOCAO_TITULARIDADE_URGENTE` | 5 |
+| `REGRA_REMOCAO_TITULARIDADE_NORMAL` | — (Bloco B, 2026-08-24: aba "Análise de Divergência - Remoção") |
+| `REGRA_REMOCAO_TITULARIDADE_ALTA` | — (idem) |
+| `REGRA_REMOCAO_TITULARIDADE_URGENTE` | — (idem) |
+| `REGRA_REMOCAO_SGA_ATIVO` | — (Bloco B, 2026-08-24: aba própria, não compete na esteira) |
+| `REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO` | — (idem) |
 
 ## Regras comuns (aplicam a Instalação e Remoção)
 

@@ -29,8 +29,10 @@ from core.constants import (
     COL_RASTREADORES_CLIENTE,
     COL_RASTREADORES_DATA_INSTALACAO,
     COL_RASTREADORES_IMEI,
+    COL_RASTREADORES_MODELO_EQUIPAMENTO,
     ORIGEM_INSTALACAO,
     ORIGEM_REMOCAO,
+    STATUS_SGA_ATIVO,
     TIPO_IDENTIFICADOR_CHASSI,
 )
 from core.normalizacao import normalizar_telefone_e164
@@ -141,6 +143,31 @@ def _modelo_alto_risco_furto(modelo: str, parametros: dict) -> bool:
     if not modelo_normalizado:
         return False
     return any(item in modelo_normalizado for item in _modelos_alto_risco_furto(parametros))
+
+
+def _modelos_removiveis(parametros: dict) -> list[str]:
+    """`system_parameters.modelos_removiveis` (Bloco B, 2026-08-24) —
+    exclusiva de Remoção, não reaproveita `modelos_alto_risco_furto`
+    (listas com propósitos diferentes: risco de furto vs. modelo de
+    equipamento elegível pra remoção)."""
+    valor = parametros.get("modelos_removiveis", "")
+    if isinstance(valor, list):
+        return valor
+    return [item.strip().upper() for item in str(valor).split(",") if item.strip()]
+
+
+def _modelo_removivel(modelo_equipamento: str, parametros: dict) -> bool:
+    """Lista vazia/não configurada bloqueia tudo (decisão fechada com o
+    usuário) — até o Admin configurar `modelos_removiveis`, nenhuma
+    remoção vira tratativa, todas caem em
+    `REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`."""
+    modelos = _modelos_removiveis(parametros)
+    if not modelos:
+        return False
+    modelo_normalizado = (modelo_equipamento or "").strip().upper()
+    if not modelo_normalizado:
+        return False
+    return any(item in modelo_normalizado for item in modelos)
 
 
 def _parse_tier(valor, default: tuple) -> tuple:
@@ -281,15 +308,42 @@ def _classificar_instalacao(registro: dict, equipamento: dict | None, parametros
 def _classificar_remocao(registro: dict, equipamento: dict | None, situacao_sga: dict | None,
                           agora: datetime, parametros: dict | None = None) -> tuple[str, int | None] | None:
     """Gating: só existe pendência de remoção pro sistema depois que o
-    SGA confirmar `INATIVO` pra esse chassi (decisão já fechada — 'SGA é
-    o gatilho de negócio'). O nível de urgência final vem sempre dos
-    dias desde `INATIVO` — a divergência (chassi ainda ativo / nome
-    diferente) só muda qual código/texto é usado, nunca o nível
-    (confirmado com o usuário). `parametros` é opcional (default `None`
-    -> trata como `{}`, preservando as faixas de dias padrão) só pra não
-    quebrar quem já chama esta função direto sem esse argumento."""
-    if not situacao_sga or situacao_sga.get("status") != "INATIVO":
+    SGA confirmar `INATIVO` ou `ATIVO` pra esse chassi (decisão já
+    fechada — 'SGA é o gatilho de negócio'). O nível de urgência final
+    vem sempre dos dias desde `INATIVO` — a divergência (chassi ainda
+    ativo / nome diferente / modelo não permitido) só muda qual
+    código/texto é usado, nunca o nível (confirmado com o usuário).
+    `parametros` é opcional (default `None` -> trata como `{}`,
+    preservando as faixas de dias padrão) só pra não quebrar quem já
+    chama esta função direto sem esse argumento.
+
+    Bloco B (2026-08-24), ordem de precedência (mais específico primeiro,
+    mesma arquitetura de cascata do resto do módulo):
+    1. Sem `situacao_sga`/status vazio -> `None` (sem dado ainda).
+    2. `status == ATIVO` (literal, não qualquer não-INATIVO) ->
+       `REGRA_REMOCAO_SGA_ATIVO`, sem tier/dias -- divergência pura, não
+       compete na esteira de urgência (mesmo espírito de
+       `REGRA_INSTALACAO_JA_FEITA`).
+    3. Qualquer outro status (nem `ATIVO` nem `INATIVO`) -> `None`
+       (gating original, sem mudança).
+    4. `status == INATIVO`: titularidade divergente tem precedência
+       sobre o filtro de modelo (decisão do usuário) -> se bater, sempre
+       `REGRA_REMOCAO_TITULARIDADE_{tier}`, mesmo que o modelo também
+       não seja permitido. Senão, o candidato normal
+       (`REGRA_REMOCAO_PRAZO_{tier}` sem equipamento /
+       `REGRA_REMOCAO_ATIVA_{tier}` com equipamento) só vira tratativa
+       se o modelo do equipamento estiver na lista permitida -- sem
+       equipamento encontrado não dá pra confirmar o modelo, então
+       também bloqueia (`REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`).
+    """
+    if not situacao_sga:
         return None
+    status = situacao_sga.get("status")
+    if status == STATUS_SGA_ATIVO:
+        return "REGRA_REMOCAO_SGA_ATIVO", None
+    if status != "INATIVO":
+        return None
+
     desde = situacao_sga.get("desde")
     if desde is None:
         return None
@@ -297,12 +351,16 @@ def _classificar_remocao(registro: dict, equipamento: dict | None, situacao_sga:
     dias = (agora.date() - desde_data).days
     tier = _tier(dias, _tier_remocao(parametros or {}))
 
-    if equipamento is None:
-        return f"REGRA_REMOCAO_PRAZO_{tier}", dias
-    cliente_cadastro = equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", "")
-    if _titularidade_diverge(registro.get("Nome Associado", ""), cliente_cadastro):
-        return f"REGRA_REMOCAO_TITULARIDADE_{tier}", dias
-    return f"REGRA_REMOCAO_ATIVA_{tier}", dias
+    if equipamento is not None:
+        cliente_cadastro = equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", "")
+        if _titularidade_diverge(registro.get("Nome Associado", ""), cliente_cadastro):
+            return f"REGRA_REMOCAO_TITULARIDADE_{tier}", dias
+
+    codigo_candidato = f"REGRA_REMOCAO_ATIVA_{tier}" if equipamento is not None else f"REGRA_REMOCAO_PRAZO_{tier}"
+    modelo_equipamento = equipamento.get(f"col_{COL_RASTREADORES_MODELO_EQUIPAMENTO}", "") if equipamento else ""
+    if not _modelo_removivel(modelo_equipamento, parametros or {}):
+        return "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO", dias
+    return codigo_candidato, dias
 
 
 def _classificar_registro(registro: dict, equipamento: dict | None, situacao_sga: dict | None,
@@ -371,17 +429,32 @@ def _montar_linha_resultado(registro: dict, codigo_regra: str, equipamento: dict
     }
 
 
-def _montar_linha_divergencia(registro: dict, equipamento: dict | None, templates: dict) -> dict:
-    """Monta uma linha de `REGRA_INSTALACAO_JA_FEITA` — chassi já
-    instalado (encontrado em Rastreadores Ativos), sem divergência de
-    titularidade, mas ainda esquecido em Instalação-Remoção. Vai pra aba
-    própria "Análise de Divergência - Instalação", nunca pra Tratativas
-    — por isso não carrega telefone/cidade/bairro/sga/nivel_urgencia
-    (campos que só fazem sentido pra tratativa de atendimento). `cpf`/
-    `situacao` só alimentam `core.dedup.gerar_chave_unica` na Fase E,
-    calculado no orchestrator (este módulo continua sem importar
-    `core.dedup`)."""
-    template = templates.get("REGRA_INSTALACAO_JA_FEITA", {})
+_MOTIVO_DIVERGENCIA_INSTALACAO = {
+    "REGRA_INSTALACAO_JA_FEITA": "Instalação já concluída",
+    "REGRA_TITULARIDADE": "Titularidade divergente",
+}
+
+_MOTIVO_DIVERGENCIA_REMOCAO = {
+    "REGRA_REMOCAO_SGA_ATIVO": "SGA confirma veículo ainda ativo",
+    "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO": "Modelo de equipamento fora da lista permitida para remoção",
+    "REGRA_REMOCAO_TITULARIDADE": "Titularidade divergente",
+}
+
+
+def _montar_linha_divergencia(registro: dict, equipamento: dict | None, templates: dict,
+                               codigo_regra: str) -> dict:
+    """Monta uma linha da aba "Análise de Divergência - Instalação" —
+    `REGRA_INSTALACAO_JA_FEITA` (chassi já instalado, sem divergência de
+    titularidade, mas ainda esquecido em Instalação-Remoção) ou
+    `REGRA_TITULARIDADE` (chassi já instalado, nome diverge — Bloco B,
+    2026-08-24: deixou de virar tratativa, é limpeza de cadastro/aviso
+    administrativo, não atendimento ao associado). Nunca vai pra
+    Tratativas — por isso não carrega telefone/cidade/bairro/sga/
+    nivel_urgencia (campos que só fazem sentido pra tratativa de
+    atendimento). `cpf`/`situacao` só alimentam `core.dedup.
+    gerar_chave_unica` na Fase E, calculado no orchestrator (este módulo
+    continua sem importar `core.dedup`)."""
+    template = templates.get(codigo_regra, {})
     valores = _valores_template(registro, equipamento, None)
     equipamento = equipamento or {}
     return {
@@ -392,10 +465,43 @@ def _montar_linha_divergencia(registro: dict, equipamento: dict | None, template
         "data_contrato": registro.get("Data contrato", ""),
         "data_instalacao": equipamento.get(f"col_{COL_RASTREADORES_DATA_INSTALACAO}", ""),
         "imei": equipamento.get(f"col_{COL_RASTREADORES_IMEI}", ""),
+        "motivo": _MOTIVO_DIVERGENCIA_INSTALACAO.get(codigo_regra, ""),
         "observacao": str(template.get("template_observacao") or "").format_map(valores),
         "acao": str(template.get("template_acao") or "").format_map(valores),
         "cpf": registro.get("CPF", ""),
         "situacao": registro.get("Situação", ""),
+    }
+
+
+def _montar_linha_divergencia_remocao(registro: dict, equipamento: dict | None,
+                                       situacao_sga: dict | None, templates: dict,
+                                       codigo_regra: str) -> dict:
+    """Monta uma linha da aba "Análise de Divergência - Remoção" (Bloco
+    B, 2026-08-24) — `REGRA_REMOCAO_SGA_ATIVO` (SGA ainda confirma
+    ATIVO), `REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO` (modelo do
+    equipamento fora da lista configurável, ou equipamento não
+    encontrado) ou `REGRA_REMOCAO_TITULARIDADE_*` (nome diverge). Mesmo
+    espírito de `_montar_linha_divergencia`: relatório mecânico, sem
+    telefone/cidade/bairro/nivel_urgencia. `cpf`/`situacao`/
+    `data_contrato` alimentam `core.dedup.gerar_chave_unica("remocao",
+    ...)` no orchestrator."""
+    template = templates.get(codigo_regra, {})
+    valores = _valores_template(registro, equipamento, None)
+    equipamento = equipamento or {}
+    motivo_chave = "REGRA_REMOCAO_TITULARIDADE" if codigo_regra.startswith("REGRA_REMOCAO_TITULARIDADE_") else codigo_regra
+    return {
+        "chassi": registro.get("Chassi", ""),
+        "placa": registro.get("Placa", ""),
+        "cliente_cadastro": registro.get("Nome Associado", ""),
+        "cliente_rastreadores": equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", ""),
+        "modelo_equipamento": equipamento.get(f"col_{COL_RASTREADORES_MODELO_EQUIPAMENTO}", ""),
+        "status_sga": situacao_sga.get("status", "") if situacao_sga else "",
+        "motivo": _MOTIVO_DIVERGENCIA_REMOCAO.get(motivo_chave, ""),
+        "observacao": str(template.get("template_observacao") or "").format_map(valores),
+        "acao": str(template.get("template_acao") or "").format_map(valores),
+        "cpf": registro.get("CPF", ""),
+        "situacao": registro.get("Situação", ""),
+        "data_contrato": registro.get("Data contrato", ""),
     }
 
 
@@ -423,23 +529,32 @@ def atualizar_situacao_sga(chassi: str, status_novo: str, registro_anterior: dic
     }
 
 
+_CODIGOS_DIVERGENCIA_INSTALACAO = {"REGRA_INSTALACAO_JA_FEITA", "REGRA_TITULARIDADE"}
+_CODIGOS_DIVERGENCIA_REMOCAO = {"REGRA_REMOCAO_SGA_ATIVO", "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"}
+
+
 def classificar_instalacao_remocao(registros: list[dict], equipamentos: list[dict],
                                     situacoes_sga: dict[str, dict], parametros: dict,
                                     templates: dict,
-                                    agora: datetime | None = None) -> tuple[list[dict], list[dict]]:
-    """Classifica as pendências de Instalação/Remoção. Retorna um par
-    `(tratativas, divergencias_instalacao)`:
+                                    agora: datetime | None = None) -> tuple[list[dict], list[dict], list[dict]]:
+    """Classifica as pendências de Instalação/Remoção. Retorna um trio
+    `(tratativas, divergencias_instalacao, divergencias_remocao)`:
 
     - `tratativas`: lista simples (não 3 grupos como `core.motor_regras.
       classificar_incidentes`) — toda regra que bate aqui é revisão
       humana, não existe resolução automática pelo sistema. Alimenta a
       aba "Tratativas".
-    - `divergencias_instalacao`: itens `REGRA_INSTALACAO_JA_FEITA`
-      (chassi já instalado, sem divergência de titularidade, mas ainda
-      esquecido em Instalação-Remoção) — nunca entram em `tratativas`
-      nem na aba "Tratativas"; vão pra aba própria "Análise de
-      Divergência - Instalação" (decisão de negócio: é limpeza de
-      cadastro, não atendimento).
+    - `divergencias_instalacao`: `REGRA_INSTALACAO_JA_FEITA` (chassi já
+      instalado, sem divergência de titularidade, mas ainda esquecido em
+      Instalação-Remoção) e `REGRA_TITULARIDADE` (chassi já instalado,
+      nome diverge — Bloco B, 2026-08-24) — nunca entram em
+      `tratativas`; vão pra aba própria "Análise de Divergência -
+      Instalação" (decisão de negócio: é limpeza de cadastro/aviso
+      administrativo, não atendimento ao associado).
+    - `divergencias_remocao` (Bloco B, 2026-08-24): `REGRA_REMOCAO_
+      SGA_ATIVO`, `REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO` e
+      `REGRA_REMOCAO_TITULARIDADE_*` — mesmo espírito, aba própria
+      "Análise de Divergência - Remoção".
 
     `situacoes_sga` é um dict pré-calculado `{chassi_maiusculo:
     {"status":, "desde":}}` (chave em upper) — este módulo não consulta
@@ -448,6 +563,7 @@ def classificar_instalacao_remocao(registros: list[dict], equipamentos: list[dic
     agora = agora or datetime.now()
     resultado = []
     divergencias_instalacao = []
+    divergencias_remocao = []
     for registro in _consolidar_por_chassi(registros):
         origem = _resolver_origem(registro.get("Serviço", ""))
         if origem is None:
@@ -460,10 +576,15 @@ def classificar_instalacao_remocao(registros: list[dict], equipamentos: list[dic
         if classificacao is None:
             continue
         codigo_regra, dias = classificacao
-        if codigo_regra == "REGRA_INSTALACAO_JA_FEITA":
-            divergencias_instalacao.append(_montar_linha_divergencia(registro, equipamento, templates))
+        if codigo_regra in _CODIGOS_DIVERGENCIA_INSTALACAO:
+            divergencias_instalacao.append(_montar_linha_divergencia(registro, equipamento, templates, codigo_regra))
+            continue
+        if codigo_regra in _CODIGOS_DIVERGENCIA_REMOCAO or codigo_regra.startswith("REGRA_REMOCAO_TITULARIDADE_"):
+            divergencias_remocao.append(
+                _montar_linha_divergencia_remocao(registro, equipamento, situacao_sga, templates, codigo_regra)
+            )
             continue
         resultado.append(
             _montar_linha_resultado(registro, codigo_regra, equipamento, origem, dias, situacao_sga, templates)
         )
-    return resultado, divergencias_instalacao
+    return resultado, divergencias_instalacao, divergencias_remocao

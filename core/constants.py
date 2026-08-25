@@ -71,9 +71,13 @@ COL_RASTREADORES_ICCID = 28
 
 # "Modelo" aparece duplicado nas posições 2 e 13 com significados diferentes
 # (confirmado ao vivo contra o xlsx real, 2026-08-10): posição 2 é o modelo
-# do RASTREADOR (ex: "J16"), posição 13 é o modelo do VEÍCULO (ex: "CG 160
-# FAN FLEX") — a única útil pra mensagem de WhatsApp (core.mensagens).
-COL_RASTREADORES_MODELO = 13
+# do RASTREADOR/EQUIPAMENTO (ex: "J16"), posição 13 é o modelo do VEÍCULO
+# (ex: "CG 160 FAN FLEX") — a única útil pra mensagem de WhatsApp
+# (core.mensagens) e pro critério de risco de Instalação. Posição 2
+# (Bloco B, 2026-08-24) alimenta o filtro de modelos permitidos pra
+# Remoção (core.motor_regras_instalacao_remocao._modelo_removivel).
+COL_RASTREADORES_MODELO_VEICULO = 13
+COL_RASTREADORES_MODELO_EQUIPAMENTO = 2
 
 # Usada só por REGRA_INSTALACAO_JA_FEITA (core.motor_regras_instalacao_
 # remocao) — nenhuma outra regra precisa da data em que o rastreador foi

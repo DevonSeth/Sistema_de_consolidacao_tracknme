@@ -55,6 +55,13 @@ export const META: Record<string, MetaParametro> = {
     categoria: "risco",
     tipo: "texto",
   },
+  modelos_removiveis: {
+    label: "Modelos de equipamento permitidos para remoção",
+    categoria: "risco",
+    tipo: "texto",
+    aviso:
+      "Lista vazia bloqueia toda remoção — nenhuma vira tratativa até aqui ser configurado, todas caem em 'Análise de Divergência - Remoção'.",
+  },
   cilindradas_excecoes: {
     label: "Exceções de cilindrada",
     categoria: "risco",

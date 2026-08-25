@@ -264,7 +264,7 @@ def test_runs_por_cor_sem_nenhuma_coluna_de_equipe_devolve_1_run():
     assert sheets._runs_por_cor(["A", "B", "C"], set()) == [(0, 3, False)]
 
 
-def test_configurar_formatacao_cabecalho_aplica_nas_5_abas(monkeypatch):
+def test_configurar_formatacao_cabecalho_aplica_nas_6_abas(monkeypatch):
     fakes = {aba: WorksheetComFormato() for aba in sheets._ABAS_CABECALHO_FORMATADO}
     monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fakes[aba])
 
@@ -272,7 +272,7 @@ def test_configurar_formatacao_cabecalho_aplica_nas_5_abas(monkeypatch):
 
     assert set(fakes) == {
         "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma",
-        "Alertas", "Análise de Divergência - Instalação",
+        "Alertas", "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
     }
     # Tratativas: interseção mais complexa (equipe intercalada com sistema)
     # conferida coluna a coluna, não só via `_runs_por_cor` (evita teste
@@ -291,7 +291,12 @@ def test_configurar_formatacao_cabecalho_aplica_nas_5_abas(monkeypatch):
         ("G1:H1", _formato(True)),
     ]
     # Análise de Divergência - Instalação: 100% sistema, 1 run só
+    # (Bloco B, 2026-08-24: ganhou a coluna "Motivo", K em vez de J)
     assert fakes["Análise de Divergência - Instalação"].formats == [
+        ("A1:K1", _formato(False)),
+    ]
+    # Análise de Divergência - Remoção (Bloco B, 2026-08-24): 100% sistema, 1 run só
+    assert fakes["Análise de Divergência - Remoção"].formats == [
         ("A1:J1", _formato(False)),
     ]
 
@@ -529,14 +534,14 @@ def test_formatar_colunas_identificador_texto_operacional_so_abas_com_telefone(m
     limite = sheets._LINHA_LIMITE_FORMATACAO_CONDICIONAL
     assert set(ws_oper) == {
         "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma", "Alertas",
-        "Análise de Divergência - Instalação",
+        "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
     }
     for aba, cabecalho in sheets._CABECALHOS_OPERACIONAL.items():
         ws = ws_oper[aba]
         if "Telefone" not in cabecalho:
-            # "Análise de Divergência - Instalação" não tem "Telefone" —
-            # nunca deve ser tocada por esta função (mesma lógica de
-            # `Instalação-Remoção`, que fica de fora de propósito).
+            # "Análise de Divergência - Instalação"/"- Remoção" não têm
+            # "Telefone" — nunca devem ser tocadas por esta função (mesma
+            # lógica de `Instalação-Remoção`, que fica de fora de propósito).
             assert ws.resized is None
             assert ws.formats == []
             continue

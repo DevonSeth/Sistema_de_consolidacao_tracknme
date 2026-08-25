@@ -42,7 +42,7 @@ from core.constants import (
     COL_RASTREADORES_DATA_POSICAO,
     COL_RASTREADORES_ICCID,
     COL_RASTREADORES_IMEI,
-    COL_RASTREADORES_MODELO,
+    COL_RASTREADORES_MODELO_VEICULO,
     COL_RASTREADORES_NUMERO,
     COL_RASTREADORES_PLACA,
     COL_RASTREADORES_STATUS,
@@ -620,7 +620,7 @@ def _montar_linha_resultado(incidente: dict, codigo_regra: str, equipamento: dic
     return {
         "id": incidente.get("ID", ""),
         "placa": incidente.get("Placa", ""),
-        "modelo": equipamento.get(f"col_{COL_RASTREADORES_MODELO}", "") if equipamento else "",
+        "modelo": equipamento.get(f"col_{COL_RASTREADORES_MODELO_VEICULO}", "") if equipamento else "",
         "chassi": chassi or "",
         "chassi_sga": chassi_sga,
         "imei": incidente.get("Imei", ""),

@@ -1824,7 +1824,7 @@ def _preparar_mocks_consolidar(monkeypatch):
         }
 
     def _classificar_instalacao_remocao_fake(registros, equipamentos, situacoes_sga, parametros, templates, agora=None):
-        return [_TRATATIVA_IR_FAKE], []
+        return [_TRATATIVA_IR_FAKE], [], []
 
     monkeypatch.setattr(orch.motor_regras, "aplicar_situacoes_sga", _aplicar_situacoes_sga_fake)
     monkeypatch.setattr(
@@ -1847,6 +1847,7 @@ async def test_etapa_consolidar_com_sga_sucesso_com_tudo_explicito(monkeypatch):
     assert {**_LINHA_GRUPO_3_APOS_SGA_FAKE, "origem": "manutencao"} in fila
     assert _TRATATIVA_IR_FAKE in fila
     assert resultado.dados["divergencias_instalacao"] == []
+    assert resultado.dados["divergencias_remocao"] == []
 
 
 @pytest.mark.asyncio
@@ -2271,10 +2272,26 @@ def _linha_divergencia_instalacao(**extra):
         "chassi": "CHASSI-JAFEITA", "placa": "ABC1234",
         "cliente_cadastro": "Fulano de Tal", "cliente_rastreadores": "Fulano de Tal",
         "data_contrato": "15/03/2026", "data_instalacao": "10/08/2026",
-        "imei": "123456789012345",
+        "imei": "123456789012345", "motivo": "Instalação já concluída",
         "observacao": "Chassi já consta em Rastreadores Ativos (instalado), mas ainda está em Instalação-Remoção.",
         "acao": "Remover ou atualizar a linha em Instalação-Remoção.",
         "cpf": "12345678900", "situacao": "Ativo",
+    }
+    base.update(extra)
+    return base
+
+
+def _linha_divergencia_remocao(**extra):
+    """Bloco B (2026-08-24) — item de `divergencias_remocao`, mesmo
+    espírito de `_linha_divergencia_instalacao`."""
+    base = {
+        "chassi": "CHASSI-SGA-ATIVO", "placa": "XYZ9A87",
+        "cliente_cadastro": "Fulano de Tal", "cliente_rastreadores": "",
+        "modelo_equipamento": "", "status_sga": "ATIVO",
+        "motivo": "SGA confirma veículo ainda ativo",
+        "observacao": "SGA ainda confirma ATIVO.",
+        "acao": "Confirmar no SGA.",
+        "cpf": "12345678900", "situacao": "Ativo", "data_contrato": "15/03/2026",
     }
     base.update(extra)
     return base
@@ -2288,7 +2305,7 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_instal
     resultado = await orch.etapa_publicar_fila_operacional([], divergencias_instalacao=[divergencia])
 
     assert resultado.sucesso is True
-    assert len(reescritas) == 2
+    assert len(reescritas) == 3
     _, aba, linhas_escritas = reescritas[1]
     assert aba == "Análise de Divergência - Instalação"
     assert len(linhas_escritas) == 1
@@ -2300,10 +2317,41 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_instal
     assert escrita["Data Contrato"] == "15/03/2026"
     assert escrita["Data de Instalação"] == "10/08/2026"
     assert escrita["IMEI"] == "123456789012345"
+    assert escrita["Motivo"] == "Instalação já concluída"
     assert escrita["Observação"] == divergencia["observacao"]
     assert escrita["Ação"] == divergencia["acao"]
     assert escrita["ID (hash)"] == gerar_chave_unica("instalacao", {
         "cpf": "12345678900", "chassi": "CHASSI-JAFEITA", "situacao": "Ativo", "data_contrato": "15/03/2026",
+    })
+    _, aba_remocao, linhas_remocao = reescritas[2]
+    assert aba_remocao == "Análise de Divergência - Remoção"
+    assert linhas_remocao == []
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_remocao(monkeypatch):
+    divergencia = _linha_divergencia_remocao()
+    reescritas, _upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+
+    resultado = await orch.etapa_publicar_fila_operacional([], divergencias_remocao=[divergencia])
+
+    assert resultado.sucesso is True
+    assert len(reescritas) == 3
+    _, aba, linhas_escritas = reescritas[2]
+    assert aba == "Análise de Divergência - Remoção"
+    assert len(linhas_escritas) == 1
+    escrita = linhas_escritas[0]
+    assert escrita["Chassi"] == "CHASSI-SGA-ATIVO"
+    assert escrita["Placa"] == "XYZ9A87"
+    assert escrita["Cliente cadastro"] == "Fulano de Tal"
+    assert escrita["Cliente Rastreadores Ativos"] == ""
+    assert escrita["Modelo do Equipamento"] == ""
+    assert escrita["Status SGA"] == "ATIVO"
+    assert escrita["Motivo"] == "SGA confirma veículo ainda ativo"
+    assert escrita["Observação"] == divergencia["observacao"]
+    assert escrita["Ação"] == divergencia["acao"]
+    assert escrita["ID (hash)"] == gerar_chave_unica("remocao", {
+        "cpf": "12345678900", "chassi": "CHASSI-SGA-ATIVO", "situacao": "Ativo", "data_contrato": "15/03/2026",
     })
 
 

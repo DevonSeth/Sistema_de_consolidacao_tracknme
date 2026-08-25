@@ -451,6 +451,7 @@ Cliente (Rastreadores Ativos)            -- "Cliente" da aba Rastreadores Ativos
 Data Contrato
 Data de Instalação                       -- da aba Rastreadores Ativos (quando o rastreador foi de fato instalado)
 IMEI                                     -- da aba Rastreadores Ativos
+Motivo                                   -- Bloco B (2026-08-24): "Instalação já concluída" ou "Titularidade divergente"
 Observação
 Ação
 ```
@@ -461,6 +462,48 @@ nenhum campo de atendente antes de reescrever (não há estado editável
 a preservar, diferente de "Tratativas"). **Pendente**: criar a
 worksheet "Análise de Divergência - Instalação" na planilha real antes
 do primeiro `reescrever_aba` (mesmo processo já usado pra "Alertas").
+
+**Bloco B (2026-08-24)**: `REGRA_TITULARIDADE` (troca de titularidade,
+chassi já instalado) passou a alimentar esta aba também, ao lado de
+`REGRA_INSTALACAO_JA_FEITA` — deixou de virar tratativa/entrar em
+"Tratativas". A coluna "Motivo" existe justamente pra diferenciar os
+dois casos numa aba compartilhada.
+
+## Aba nova "Análise de Divergência - Remoção" — Bloco B, 2026-08-24
+
+Mesmo espírito da aba de Instalação acima (relatório mecânico, sem fila
+de atendimento, reescrita do zero a cada ciclo), mas pra 3 situações de
+Remoção que não devem virar tratativa de atendimento: SGA ainda
+confirma `ATIVO` (`REGRA_REMOCAO_SGA_ATIVO`), modelo do equipamento fora
+da lista permitida (`REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`,
+`system_parameters.modelos_removiveis`) e titularidade divergente
+(`REGRA_REMOCAO_TITULARIDADE_*` — deixou de entrar em "Tratativas",
+mesma mudança de `REGRA_TITULARIDADE` acima). Ver
+`docs/regras_negocio_instalacao_remocao.md` pra critério completo de
+cada regra.
+
+**Cabeçalho** (`CABECALHO_ANALISE_DIVERGENCIA_REMOCAO`,
+`integrations/google_sheets_client.py`):
+
+```
+ID (hash)                                -- mesma fórmula de hash de Remoção (cpf+chassi+situacao+data_contrato)
+Chassi
+Placa
+Cliente cadastro                         -- "Nome Associado" da aba Instalação-Remoção
+Cliente Rastreadores Ativos              -- "Cliente" da aba Rastreadores Ativos, mesmo chassi (conferência visual)
+Modelo do Equipamento                    -- coluna B de Rastreadores Ativos (rastreador, não o veículo)
+Status SGA                               -- status vivo consultado (ATIVO/INATIVO)
+Motivo                                   -- qual das 3 situações gerou a linha
+Observação
+Ação
+```
+
+Alimentada por `etapa_publicar_fila_operacional` (Fase E), mesmo padrão
+mecânico da aba de Instalação. **Pendente**: criar a worksheet "Análise
+de Divergência - Remoção" na planilha real antes do primeiro
+`reescrever_aba` (mesmo processo já usado pra "Alertas"/"Análise de
+Divergência - Instalação") — sem isso a Fase E quebra tentando escrever
+numa aba inexistente.
 
 ## Correção de validação/cabeçalho — achado e resolvido 2026-08-14
 

@@ -1038,10 +1038,13 @@ async def etapa_consolidar_com_sga(
     classificar_instalacao_remocao` — só dá pra classificar agora, com o
     SGA disponível). Junta a fila real: `grupo_3_tratativa_humana` (com
     `origem='manutencao'` adicionado) + a lista de Instalação/Remoção (já
-    vem com `origem` própria). `divergencias_instalacao` (itens
-    `REGRA_INSTALACAO_JA_FEITA`) vem separado no retorno — nunca entra em
-    `fila_operacional`/Tratativas, alimenta a aba própria "Análise de
-    Divergência - Instalação" na Fase E.
+    vem com `origem` própria). `divergencias_instalacao`/`divergencias_
+    remocao` (Bloco B, 2026-08-24: itens `REGRA_INSTALACAO_JA_FEITA`/
+    `REGRA_TITULARIDADE` e `REGRA_REMOCAO_SGA_ATIVO`/`REGRA_REMOCAO_
+    EQUIPAMENTO_NAO_PERMITIDO`/`REGRA_REMOCAO_TITULARIDADE_*`) vêm
+    separados no retorno — nunca entram em `fila_operacional`/Tratativas,
+    alimentam as abas próprias "Análise de Divergência - Instalação"/"-
+    Remoção" na Fase E.
 
     Todos os parâmetros são opcionais, com o mesmo espírito de default
     das etapas anteriores (permitir rodar isolada no painel) — mas como
@@ -1072,7 +1075,7 @@ async def etapa_consolidar_com_sga(
         grupos_manutencao = motor_regras.aplicar_situacoes_sga(
             dados_classificacao, dados_sga["situacoes_sga"], templates
         )
-        tratativas_instalacao_remocao, divergencias_instalacao = (
+        tratativas_instalacao_remocao, divergencias_instalacao, divergencias_remocao = (
             motor_regras_instalacao_remocao.classificar_instalacao_remocao(
                 instalacao_remocao, equipamentos, dados_sga["situacoes_sga"], parametros, templates
             )
@@ -1091,6 +1094,7 @@ async def etapa_consolidar_com_sga(
             "grupo_2_concluir": grupos_manutencao["grupo_2_concluir"],
             "fila_operacional": fila_operacional,
             "divergencias_instalacao": divergencias_instalacao,
+            "divergencias_remocao": divergencias_remocao,
         },
     )
 
@@ -1455,6 +1459,27 @@ def _linha_divergencia_para_aba(linha: dict, chave_unica: str) -> dict:
         "Data Contrato": linha.get("data_contrato", ""),
         "Data de Instalação": linha.get("data_instalacao", ""),
         "IMEI": linha.get("imei", ""),
+        "Motivo": linha.get("motivo", ""),
+        "Observação": linha.get("observacao", ""),
+        "Ação": linha.get("acao", ""),
+    }
+
+
+def _linha_divergencia_remocao_para_aba(linha: dict, chave_unica: str) -> dict:
+    """Monta uma linha da aba "Análise de Divergência - Remoção" (Bloco
+    B, 2026-08-24) a partir de um item de `divergencias_remocao`
+    (`core.motor_regras_instalacao_remocao._montar_linha_divergencia_
+    remocao`). Mesmo espírito de `_linha_divergencia_para_aba`: sem
+    estado de atendente."""
+    return {
+        "ID (hash)": chave_unica,
+        "Chassi": linha.get("chassi", ""),
+        "Placa": linha.get("placa", ""),
+        "Cliente cadastro": linha.get("cliente_cadastro", ""),
+        "Cliente Rastreadores Ativos": linha.get("cliente_rastreadores", ""),
+        "Modelo do Equipamento": linha.get("modelo_equipamento", ""),
+        "Status SGA": linha.get("status_sga", ""),
+        "Motivo": linha.get("motivo", ""),
         "Observação": linha.get("observacao", ""),
         "Ação": linha.get("acao", ""),
     }
@@ -1501,13 +1526,15 @@ async def etapa_publicar_fila_operacional(
     fila_operacional: list[dict] | None = None,
     agora: datetime | None = None,
     divergencias_instalacao: list[dict] | None = None,
+    divergencias_remocao: list[dict] | None = None,
 ) -> ResultadoEtapa:
     """Fase E — persiste `fila_operacional` (saída de
     `etapa_consolidar_com_sga`) em `tratativas` (Supabase) e reescreve a
-    aba "Tratativas" da planilha Operacional. Também reescreve a aba
-    "Análise de Divergência - Instalação" com `divergencias_instalacao`
-    (itens `REGRA_INSTALACAO_JA_FEITA`) — mecânico, sem Supabase, sem
-    estado de atendente (ver passo 5 abaixo).
+    aba "Tratativas" da planilha Operacional. Também reescreve as abas
+    "Análise de Divergência - Instalação" (`divergencias_instalacao`) e
+    "Análise de Divergência - Remoção" (`divergencias_remocao`, Bloco B,
+    2026-08-24) — mecânico, sem Supabase, sem estado de atendente (ver
+    passo 5 abaixo).
 
     Async só por causa do default de `fila_operacional` (chama
     `etapa_consolidar_com_sga()`, que depende de Playwright/SGA) — o
@@ -1530,10 +1557,11 @@ async def etapa_publicar_fila_operacional(
        estão marcadas `Finalizado` (lido no passo 1) — uma linha some da
        aba quando o atendente confirma que já está resolvida, mesmo que
        o motor ainda a gere neste ciclo.
-    5. Reescreve "Análise de Divergência - Instalação" do zero com
-       `divergencias_instalacao` — sem upsert em `tratativas` (não são
-       tratativas) e sem sincronizar nada da aba antiga antes (não há
-       campo editável pelo atendente pra preservar).
+    5. Reescreve "Análise de Divergência - Instalação"/"- Remoção" do
+       zero com `divergencias_instalacao`/`divergencias_remocao` — sem
+       upsert em `tratativas` (não são tratativas) e sem sincronizar
+       nada da aba antiga antes (não há campo editável pelo atendente
+       pra preservar).
     """
     if fila_operacional is None:
         resultado_consolidacao = await etapa_consolidar_com_sga()
@@ -1544,7 +1572,10 @@ async def etapa_publicar_fila_operacional(
         fila_operacional = resultado_consolidacao.dados["fila_operacional"]
         if divergencias_instalacao is None:
             divergencias_instalacao = resultado_consolidacao.dados.get("divergencias_instalacao", [])
+        if divergencias_remocao is None:
+            divergencias_remocao = resultado_consolidacao.dados.get("divergencias_remocao", [])
     divergencias_instalacao = divergencias_instalacao if divergencias_instalacao is not None else []
+    divergencias_remocao = divergencias_remocao if divergencias_remocao is not None else []
 
     try:
         agora_dt = agora or datetime.now()
@@ -1595,6 +1626,17 @@ async def etapa_publicar_fila_operacional(
         with _anotar_erro("reescrever_aba:Analise_Divergencia_Instalacao"):
             google_sheets_client.reescrever_aba(
                 google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Instalação", linhas_divergencia
+            )
+
+        linhas_divergencia_remocao = [
+            _linha_divergencia_remocao_para_aba(
+                linha, dedup.gerar_chave_unica(ORIGEM_REMOCAO, _dados_hash_chave_unica(linha))
+            )
+            for linha in divergencias_remocao
+        ]
+        with _anotar_erro("reescrever_aba:Analise_Divergencia_Remocao"):
+            google_sheets_client.reescrever_aba(
+                google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Remoção", linhas_divergencia_remocao
             )
 
         # Depois das escritas principais (Sheets/Supabase já refletem esta

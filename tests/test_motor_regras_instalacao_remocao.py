@@ -5,6 +5,7 @@ from core.constants import (
     COL_RASTREADORES_CLIENTE,
     COL_RASTREADORES_DATA_INSTALACAO,
     COL_RASTREADORES_IMEI,
+    COL_RASTREADORES_MODELO_EQUIPAMENTO,
 )
 from core.motor_regras_instalacao_remocao import (
     _buscar_equipamento_por_chassi,
@@ -43,12 +44,14 @@ def _registro(chassi="9BWZZZ377VT004251", nome_associado="Fulano de Tal", placa=
     }
 
 
-def _equipamento(chassi="9BWZZZ377VT004251", cliente="Fulano de Tal", imei="", data_instalacao=""):
+def _equipamento(chassi="9BWZZZ377VT004251", cliente="Fulano de Tal", imei="", data_instalacao="",
+                  modelo_equipamento=""):
     return {
         f"col_{COL_RASTREADORES_CHASSI}": chassi,
         f"col_{COL_RASTREADORES_CLIENTE}": cliente,
         f"col_{COL_RASTREADORES_IMEI}": imei,
         f"col_{COL_RASTREADORES_DATA_INSTALACAO}": data_instalacao,
+        f"col_{COL_RASTREADORES_MODELO_EQUIPAMENTO}": modelo_equipamento,
     }
 
 
@@ -228,44 +231,86 @@ class TestClassificarInstalacao:
 
 class TestClassificarRemocao:
     AGORA = datetime(2026, 8, 6, 12, 0, 0)
+    MODELO_PERMITIDO = {"modelos_removiveis": "J16,ST300"}
 
     def test_sem_situacao_sga_nao_gera_nada(self):
         registro = _registro(servico="Retirada")
         assert _classificar_remocao(registro, None, None, self.AGORA) is None
 
-    def test_sga_ainda_ativo_nao_gera_nada(self):
+    def test_sga_ativo_gera_divergencia_sem_dias(self):
+        """Bloco B (2026-08-24): antes descartado em silêncio, agora
+        sinaliza que a remoção pendente pode estar desatualizada (SGA
+        ainda não confirma cancelamento) — sem tier/dias, igual a
+        REGRA_INSTALACAO_JA_FEITA."""
         registro = _registro(servico="Retirada")
         situacao_sga = {"status": "ATIVO", "desde": date(2026, 8, 1)}
+        assert _classificar_remocao(registro, None, situacao_sga, self.AGORA) == ("REGRA_REMOCAO_SGA_ATIVO", None)
+
+    def test_outro_status_sga_nao_gera_nada(self):
+        """Qualquer status que não seja literalmente ATIVO/INATIVO
+        continua descartado em silêncio (gating original, sem mudança)."""
+        registro = _registro(servico="Retirada")
+        situacao_sga = {"status": "NÃO ENCONTRADO", "desde": date(2026, 8, 1)}
         assert _classificar_remocao(registro, None, situacao_sga, self.AGORA) is None
 
-    def test_prazo_normal_quando_chassi_nao_encontrado(self):
+    def test_prazo_sem_equipamento_e_bloqueado_por_falta_de_modelo(self):
+        """Bloco B (2026-08-24), decisão confirmada: sem equipamento
+        encontrado não há 'Modelo do Equipamento' pra confirmar contra a
+        lista permitida — bloqueia igual a um modelo fora da lista, vira
+        divergência em vez de tratativa (mesmo com a lista configurada)."""
         registro = _registro(servico="Retirada")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
-        assert _classificar_remocao(registro, None, situacao_sga, self.AGORA) == ("REGRA_REMOCAO_PRAZO_NORMAL", 5)
+        codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
+        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
+        assert dias == 5
 
-    def test_prazo_alta(self):
-        registro = _registro(servico="Retirada")
-        situacao_sga = {"status": "INATIVO", "desde": date(2026, 7, 20)}
-        assert _classificar_remocao(registro, None, situacao_sga, self.AGORA) == ("REGRA_REMOCAO_PRAZO_ALTA", 17)
-
-    def test_prazo_urgente_congela_mesmo_com_muitos_dias(self):
-        registro = _registro(servico="Retirada")
-        situacao_sga = {"status": "INATIVO", "desde": date(2026, 6, 1)}
-        codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA)
-        assert codigo == "REGRA_REMOCAO_PRAZO_URGENTE"
-        assert dias == 66
-
-    def test_ativa_quando_chassi_encontrado_e_nome_bate(self):
+    def test_ativa_quando_chassi_encontrado_nome_bate_e_modelo_permitido(self):
         registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
-        equipamento = _equipamento(cliente="Fulano de Tal")
+        equipamento = _equipamento(cliente="Fulano de Tal", modelo_equipamento="J16")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
-        assert _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA) == ("REGRA_REMOCAO_ATIVA_NORMAL", 5)
+        assert _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, self.MODELO_PERMITIDO) == (
+            "REGRA_REMOCAO_ATIVA_NORMAL", 5
+        )
+
+    def test_ativa_bloqueada_quando_modelo_fora_da_lista(self):
+        """Bloco B (2026-08-24): equipamento encontrado, sem divergência
+        de titularidade, mas o modelo não está em `modelos_removiveis` —
+        redireciona pra divergência (não bloqueia a avaliação de
+        prazo/titularidade, só o destino final)."""
+        registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
+        equipamento = _equipamento(cliente="Fulano de Tal", modelo_equipamento="OUTRO MODELO")
+        situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
+        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
+        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
+        assert dias == 5
+
+    def test_lista_vazia_bloqueia_tudo(self):
+        """`modelos_removiveis` não configurado (parametros vazio) —
+        decisão fechada: bloqueia tudo até o Admin configurar, mesmo com
+        um modelo real de equipamento presente."""
+        registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
+        equipamento = _equipamento(cliente="Fulano de Tal", modelo_equipamento="J16")
+        situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
+        codigo, _ = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, {})
+        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
 
     def test_titularidade_quando_chassi_encontrado_e_nome_diverge(self):
         registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
-        equipamento = _equipamento(cliente="Outra Pessoa")
+        equipamento = _equipamento(cliente="Outra Pessoa", modelo_equipamento="J16")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 7, 10)}
-        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA)
+        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
+        assert codigo == "REGRA_REMOCAO_TITULARIDADE_URGENTE"
+        assert dias == 27
+
+    def test_titularidade_vence_mesmo_com_modelo_fora_da_lista(self):
+        """Decisão confirmada nesta sessão: titularidade tem precedência
+        sobre o filtro de modelo — mesmo com o modelo fora da lista
+        permitida, o motivo que aparece é titularidade, não 'equipamento
+        não permitido'."""
+        registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
+        equipamento = _equipamento(cliente="Outra Pessoa", modelo_equipamento="OUTRO MODELO")
+        situacao_sga = {"status": "INATIVO", "desde": date(2026, 7, 10)}
+        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
         assert codigo == "REGRA_REMOCAO_TITULARIDADE_URGENTE"
         assert dias == 27
 
@@ -273,23 +318,22 @@ class TestClassificarRemocao:
         """Confirma a decisão de 2026-08-06: dias sempre mandam, mesmo
         quando o chassi ainda está ativo (divergência)."""
         registro = _registro(servico="Retirada", nome_associado="Fulano de Tal")
-        equipamento = _equipamento(cliente="Fulano de Tal")
+        equipamento = _equipamento(cliente="Fulano de Tal", modelo_equipamento="J16")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 7, 10)}
-        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA)
+        codigo, dias = _classificar_remocao(registro, equipamento, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
         assert codigo == "REGRA_REMOCAO_ATIVA_URGENTE"
         assert dias == 27
 
     def test_tier_remocao_customizado_via_parametros(self):
         """5 dias seria NORMAL na faixa padrão — com uma faixa
-        customizada onde URGENTE já começa em 3 dias, muda de verdade.
-        Confirma também que `_classificar_remocao` sem `parametros`
-        (default `None`) continua usando a faixa padrão (demais testes
-        desta classe não passam esse argumento)."""
+        customizada onde URGENTE já começa em 3 dias, muda de verdade
+        (confirmado no `dias` retornado, já que sem equipamento o
+        código final vira sempre EQUIPAMENTO_NAO_PERMITIDO agora)."""
         registro = _registro(servico="Retirada")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
         parametros = {"tier_remocao": "21=URGENTE,11=ALTA,3=URGENTE_RAPIDO,1=NORMAL"}
         codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA, parametros)
-        assert codigo == "REGRA_REMOCAO_PRAZO_URGENTE_RAPIDO"
+        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
         assert dias == 5
 
 
@@ -337,7 +381,7 @@ class TestClassificarInstalacaoRemocaoIntegracao:
     caso de Instalação e um de Remoção, e o gating por SGA."""
 
     AGORA = datetime(2026, 8, 6, 12, 0, 0)
-    PARAMETROS = {"modelos_alto_risco_furto": "ONIX,GOL,HB20"}
+    PARAMETROS = {"modelos_alto_risco_furto": "ONIX,GOL,HB20", "modelos_removiveis": "J16"}
     TEMPLATES = {
         "REGRA_PRAZO_NORMAL": {"template_acao": "Aguardar.", "template_observacao": "Pendente há {dias} dias.", "nivel_urgencia": 1},
         "REGRA_PRAZO_E_RISCO": {"template_acao": "Agendar já.", "template_observacao": "Risco + {dias} dias.", "nivel_urgencia": 5},
@@ -348,6 +392,8 @@ class TestClassificarInstalacaoRemocaoIntegracao:
         },
         "REGRA_REMOCAO_PRAZO_URGENTE": {"template_acao": "Agendar retirada urgente.", "template_observacao": "INATIVO há {dias} dias.", "nivel_urgencia": 5},
         "REGRA_REMOCAO_ATIVA_NORMAL": {"template_acao": "Verificar divergência.", "template_observacao": "Ainda ativo, {dias} dias INATIVO.", "nivel_urgencia": 1},
+        "REGRA_REMOCAO_SGA_ATIVO": {"template_acao": "Confirmar no SGA.", "template_observacao": "SGA ainda confirma ATIVO."},
+        "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO": {"template_acao": "Revisar lista de modelos.", "template_observacao": "Modelo fora da lista permitida."},
     }
 
     def test_fluxo_completo(self):
@@ -358,55 +404,85 @@ class TestClassificarInstalacaoRemocaoIntegracao:
             # instalação pendente, risco (moto grande) + prazo em atraso -> REGRA_PRAZO_E_RISCO
             _registro(chassi="CHASSI-RISCO", data_contrato="17/07/2026", tipo_veiculo="Moto",
                       modelo="CB 300F TWISTER", servico="Instalação"),
-            # instalação já feita, nome diverge -> REGRA_TITULARIDADE
+            # instalação já feita, nome diverge -> REGRA_TITULARIDADE (agora vai pra divergência)
             _registro(chassi="CHASSI-TITULAR", nome_associado="Fulano de Tal", servico="Instalação"),
             # instalação normal, sem risco -> REGRA_PRAZO_NORMAL
             _registro(chassi="CHASSI-NORMAL", data_contrato="01/08/2026", tipo_veiculo="Passeio",
                       modelo="Modelo Sem Risco", valor_fipe="30000", servico="Instalação"),
-            # instalação já feita, nome bate -> REGRA_INSTALACAO_JA_FEITA (2ª lista)
+            # instalação já feita, nome bate -> REGRA_INSTALACAO_JA_FEITA (divergência)
             _registro(chassi="CHASSI-JAFEITA", nome_associado="Fulano de Tal", servico="Instalação"),
+            # remoção, SGA ainda ATIVO -> REGRA_REMOCAO_SGA_ATIVO (divergência de remoção)
+            _registro(chassi="CHASSI-SGA-ATIVO", servico="Retirada"),
+            # remoção, equipamento encontrado mas modelo fora da lista -> divergência de remoção
+            _registro(chassi="CHASSI-MODELO-FORA", servico="Retirada"),
         ]
         equipamentos = [
             _equipamento(chassi="CHASSI-TITULAR", cliente="Outra Pessoa"),
-            _equipamento(chassi="CHASSI-DUP", cliente="Fulano de Tal"),
+            _equipamento(chassi="CHASSI-DUP", cliente="Fulano de Tal", modelo_equipamento="J16"),
             _equipamento(chassi="CHASSI-JAFEITA", cliente="Fulano de Tal", imei="123456789012345",
                          data_instalacao="10/08/2026"),
+            _equipamento(chassi="CHASSI-MODELO-FORA", cliente="Fulano de Tal", modelo_equipamento="ST300"),
         ]
         situacoes_sga = {
             "CHASSI-DUP": {"status": "INATIVO", "desde": date(2026, 8, 1)},
+            "CHASSI-SGA-ATIVO": {"status": "ATIVO", "desde": date(2026, 8, 1)},
+            "CHASSI-MODELO-FORA": {"status": "INATIVO", "desde": date(2026, 8, 1)},
         }
 
-        resultado, divergencias = classificar_instalacao_remocao(
+        resultado, divergencias_instalacao, divergencias_remocao = classificar_instalacao_remocao(
             registros, equipamentos, situacoes_sga, self.PARAMETROS, self.TEMPLATES, agora=self.AGORA
         )
         por_chassi = {linha["chassi"]: linha for linha in resultado}
 
-        assert len(resultado) == 4
+        assert len(resultado) == 3
         assert por_chassi["CHASSI-DUP"]["codigo_regra"] == "REGRA_REMOCAO_ATIVA_NORMAL"
         assert por_chassi["CHASSI-RISCO"]["codigo_regra"] == "REGRA_PRAZO_E_RISCO"
-        assert por_chassi["CHASSI-TITULAR"]["codigo_regra"] == "REGRA_TITULARIDADE"
-        assert "Fulano de Tal" in por_chassi["CHASSI-TITULAR"]["observacao_sistema"]
         assert por_chassi["CHASSI-NORMAL"]["codigo_regra"] == "REGRA_PRAZO_NORMAL"
         assert por_chassi["CHASSI-NORMAL"]["nivel_urgencia"] == 1
 
-        # REGRA_INSTALACAO_JA_FEITA nunca vira tratativa — só aparece na
-        # 2ª lista, isolada da esteira normal.
+        # REGRA_TITULARIDADE/REGRA_INSTALACAO_JA_FEITA nunca viram
+        # tratativa — só aparecem na lista de divergência de Instalação.
+        assert "CHASSI-TITULAR" not in por_chassi
         assert "CHASSI-JAFEITA" not in por_chassi
-        assert len(divergencias) == 1
-        divergencia = divergencias[0]
-        assert divergencia["chassi"] == "CHASSI-JAFEITA"
-        assert divergencia["placa"] == "ABC1234"
-        assert divergencia["cliente_cadastro"] == "Fulano de Tal"
-        assert divergencia["cliente_rastreadores"] == "Fulano de Tal"
-        assert divergencia["data_contrato"] == "15/03/2026"
-        assert divergencia["data_instalacao"] == "10/08/2026"
-        assert divergencia["imei"] == "123456789012345"
-        assert divergencia["observacao"] == (
+        assert len(divergencias_instalacao) == 2
+        por_chassi_div_instalacao = {linha["chassi"]: linha for linha in divergencias_instalacao}
+
+        divergencia_titular = por_chassi_div_instalacao["CHASSI-TITULAR"]
+        assert divergencia_titular["motivo"] == "Titularidade divergente"
+        assert "Fulano de Tal" in divergencia_titular["observacao"]
+
+        divergencia_jafeita = por_chassi_div_instalacao["CHASSI-JAFEITA"]
+        assert divergencia_jafeita["motivo"] == "Instalação já concluída"
+        assert divergencia_jafeita["placa"] == "ABC1234"
+        assert divergencia_jafeita["cliente_cadastro"] == "Fulano de Tal"
+        assert divergencia_jafeita["cliente_rastreadores"] == "Fulano de Tal"
+        assert divergencia_jafeita["data_contrato"] == "15/03/2026"
+        assert divergencia_jafeita["data_instalacao"] == "10/08/2026"
+        assert divergencia_jafeita["imei"] == "123456789012345"
+        assert divergencia_jafeita["observacao"] == (
             "Chassi já consta em Rastreadores Ativos (instalado), mas ainda está em Instalação-Remoção."
         )
-        assert divergencia["acao"] == "Remover ou atualizar a linha em Instalação-Remoção."
-        assert divergencia["cpf"] == "12345678900"
-        assert divergencia["situacao"] == "Ativo"
+        assert divergencia_jafeita["acao"] == "Remover ou atualizar a linha em Instalação-Remoção."
+        assert divergencia_jafeita["cpf"] == "12345678900"
+        assert divergencia_jafeita["situacao"] == "Ativo"
+
+        # Remoção: nem SGA-ATIVO nem modelo fora da lista viram tratativa.
+        assert "CHASSI-SGA-ATIVO" not in por_chassi
+        assert "CHASSI-MODELO-FORA" not in por_chassi
+        assert len(divergencias_remocao) == 2
+        por_chassi_div_remocao = {linha["chassi"]: linha for linha in divergencias_remocao}
+
+        divergencia_sga_ativo = por_chassi_div_remocao["CHASSI-SGA-ATIVO"]
+        assert divergencia_sga_ativo["motivo"] == "SGA confirma veículo ainda ativo"
+        assert divergencia_sga_ativo["status_sga"] == "ATIVO"
+
+        divergencia_modelo_fora = por_chassi_div_remocao["CHASSI-MODELO-FORA"]
+        assert divergencia_modelo_fora["motivo"] == "Modelo de equipamento fora da lista permitida para remoção"
+        assert divergencia_modelo_fora["modelo_equipamento"] == "ST300"
+        assert divergencia_modelo_fora["status_sga"] == "INATIVO"
+
+        # CHASSI-DUP tem entrada conhecida em situacoes_sga -> "sga" reflete o status vivo.
+        assert por_chassi["CHASSI-DUP"]["sga"] == "INATIVO"
 
         # Campos novos pra tratativa/chave_unica completa — vêm direto da
         # própria linha de Instalação-Remoção (não do SGA, decisão fechada).
@@ -428,12 +504,13 @@ class TestClassificarInstalacaoRemocaoIntegracao:
     def test_telefone_vazio_quando_celular_nao_informado(self):
         registros = [_registro(chassi="CHASSI-SEMFONE", celular="", servico="Instalação")]
 
-        resultado, divergencias = classificar_instalacao_remocao(
+        resultado, divergencias_instalacao, divergencias_remocao = classificar_instalacao_remocao(
             registros, [], {}, self.PARAMETROS, self.TEMPLATES, agora=self.AGORA
         )
 
         assert resultado[0]["telefone"] == ""
-        assert divergencias == []
+        assert divergencias_instalacao == []
+        assert divergencias_remocao == []
 
     def test_chassi_nao_encontrado_nao_gera_divergencia(self):
         """Chassi ainda não instalado (equipamento não encontrado) segue
@@ -444,10 +521,11 @@ class TestClassificarInstalacaoRemocaoIntegracao:
                                 tipo_veiculo="Passeio", modelo="Modelo Sem Risco",
                                 valor_fipe="30000", servico="Instalação")]
 
-        resultado, divergencias = classificar_instalacao_remocao(
+        resultado, divergencias_instalacao, divergencias_remocao = classificar_instalacao_remocao(
             registros, [], {}, self.PARAMETROS, self.TEMPLATES, agora=self.AGORA
         )
 
         assert len(resultado) == 1
         assert resultado[0]["codigo_regra"] == "REGRA_PRAZO_NORMAL"
-        assert divergencias == []
+        assert divergencias_instalacao == []
+        assert divergencias_remocao == []

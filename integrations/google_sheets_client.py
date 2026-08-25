@@ -190,7 +190,16 @@ CABECALHO_ALERTAS = [
 CABECALHO_ANALISE_DIVERGENCIA_INSTALACAO = [
     "ID (hash)", "Chassi", "Placa",
     "Cliente (Instalação-Remoção cadastro)", "Cliente (Rastreadores Ativos)",
-    "Data Contrato", "Data de Instalação", "IMEI", "Observação", "Ação",
+    "Data Contrato", "Data de Instalação", "IMEI", "Motivo", "Observação", "Ação",
+]
+
+# Bloco B (2026-08-24) — mesmo espírito da de Instalação, mas pra
+# divergências de Remoção (SGA ainda ATIVO, modelo de equipamento fora
+# da lista permitida, titularidade divergente).
+CABECALHO_ANALISE_DIVERGENCIA_REMOCAO = [
+    "ID (hash)", "Chassi", "Placa",
+    "Cliente cadastro", "Cliente Rastreadores Ativos",
+    "Modelo do Equipamento", "Status SGA", "Motivo", "Observação", "Ação",
 ]
 
 _CABECALHOS_OPERACIONAL = {
@@ -199,6 +208,7 @@ _CABECALHOS_OPERACIONAL = {
     "Encaminhar pra Puma": CABECALHO_ENCAMINHAR_PUMA,
     "Alertas": CABECALHO_ALERTAS,
     "Análise de Divergência - Instalação": CABECALHO_ANALISE_DIVERGENCIA_INSTALACAO,
+    "Análise de Divergência - Remoção": CABECALHO_ANALISE_DIVERGENCIA_REMOCAO,
 }
 
 
@@ -683,7 +693,7 @@ def configurar_validacao_status_puma() -> None:
 
 _ABAS_CABECALHO_FORMATADO = [
     "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma",
-    "Alertas", "Análise de Divergência - Instalação",
+    "Alertas", "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
 ]
 _COR_CABECALHO_FUNDO_SISTEMA = convert_hex_to_colors_dict("#0A1B5E")
 _COR_CABECALHO_FUNDO_EQUIPE = convert_hex_to_colors_dict("#0046B0")
@@ -713,6 +723,7 @@ _COLUNAS_EQUIPE_POR_ABA: dict[str, set[str]] = {
     "Encaminhar pra Puma": {"Status", "Observação Puma"},
     "Alertas": {"Ação", "Data Agendada"},
     "Análise de Divergência - Instalação": set(),
+    "Análise de Divergência - Remoção": set(),
 }
 
 
