@@ -417,7 +417,7 @@ def test_sincronizar_observacao_puma_sem_encaminhamento_levanta_erro(monkeypatch
 
 
 # --------------------------------------------------------------------------
-# sincronizar_campos_atendente
+# sincronizar_campos_atendente (versão por-linha, pros fluxos pontuais)
 # --------------------------------------------------------------------------
 
 def test_sincronizar_campos_atendente_sem_status_nao_grava_historico(monkeypatch):
@@ -469,6 +469,136 @@ def test_sincronizar_campos_atendente_chave_inexistente_nao_grava_historico(monk
     sc.sincronizar_campos_atendente("chave-fantasma", {"status": sc.STATUS_FINALIZADO})
 
     assert _chamadas_insert(cliente, "historico_status_tratativa") == []
+
+
+# --------------------------------------------------------------------------
+# buscar_estado_atendente_por_chaves / sincronizar_campos_atendente_em_lote
+# (achado 2026-08-25: pro fluxo de volume real, Fase E, substitui o uso em
+# loop da sincronizar_campos_atendente por-linha pelo mesmo padrão em lote
+# de upsert_tratativas_em_lote)
+# --------------------------------------------------------------------------
+
+def test_buscar_estado_atendente_por_chaves_vazio_nao_consulta(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    assert sc.buscar_estado_atendente_por_chaves([]) == {}
+    assert cliente.chamadas == []
+
+
+def test_buscar_estado_atendente_por_chaves_chave_inexistente_nao_aparece(monkeypatch):
+    cliente = _ClienteFalso(retornos={"tratativas": [[]]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    assert sc.buscar_estado_atendente_por_chaves(["chave-fantasma"]) == {}
+
+
+def test_sincronizar_campos_atendente_em_lote_vazio_nao_chama_supabase(monkeypatch):
+    cliente = _ClienteFalso()
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({})
+
+    assert cliente.chamadas == []
+
+
+def test_sincronizar_campos_atendente_em_lote_sem_status_nao_grava_historico(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[{
+            "id": "trat-1", "chave_unica": "chave-1", "status": "aguardando_resposta",
+            "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+        }]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({"chave-1": {"selecionado": True}})
+
+    assert _chamadas_insert(cliente, "historico_status_tratativa") == []
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    assert upserts[0][0]["status"] == "aguardando_resposta"
+
+
+def test_sincronizar_campos_atendente_em_lote_finalizado_seta_finalizado_em_e_historico(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[{
+            "id": "trat-1", "chave_unica": "chave-1", "status": "pendente",
+            "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+        }]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({"chave-1": {"status": sc.STATUS_FINALIZADO}})
+
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    assert upserts[0][0]["status"] == sc.STATUS_FINALIZADO
+    assert "finalizado_em" in upserts[0][0]
+
+    historico = _chamadas_insert(cliente, "historico_status_tratativa")
+    assert historico == [{"tratativa_id": "trat-1", "status_novo": sc.STATUS_FINALIZADO}]
+
+
+def test_sincronizar_campos_atendente_em_lote_respeita_finalizado_em_ja_presente(monkeypatch):
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[{
+            "id": "trat-1", "chave_unica": "chave-1", "status": "pendente",
+            "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+        }]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({
+        "chave-1": {"status": sc.STATUS_FINALIZADO, "finalizado_em": "2026-01-01T00:00:00+00:00"},
+    })
+
+    upserts = _chamadas_upsert(cliente, "tratativas")
+    assert upserts[0][0]["finalizado_em"] == "2026-01-01T00:00:00+00:00"
+
+
+def test_sincronizar_campos_atendente_em_lote_chave_inexistente_nao_entra_no_upsert(monkeypatch):
+    """Mesma guarda de sempre: chave que não existe no Supabase não gera
+    upsert (nunca cria linha nova só com campos de atendente) nem histórico."""
+    cliente = _ClienteFalso(retornos={"tratativas": [[]]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({"chave-fantasma": {"status": sc.STATUS_FINALIZADO}})
+
+    assert _chamadas_upsert(cliente, "tratativas") == []
+    assert _chamadas_insert(cliente, "historico_status_tratativa") == []
+
+
+def test_sincronizar_campos_atendente_em_lote_preserva_campos_nao_tocados_do_lote_heterogeneo(monkeypatch):
+    """Prova a correção do achado de heterogeneidade (mesma lógica já usada
+    pro campo status em upsert_tratativas_em_lote): uma linha do lote que só
+    mudou 'selecionado' não pode ter status/data_agendada/status_contato/
+    situacao_manual_definida_em sobrescritos com None só porque OUTRA linha
+    do mesmo lote trouxe esses campos no payload de upsert."""
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[
+            {
+                "id": "id-1", "chave_unica": "chave-1", "status": "aguardando_resposta",
+                "data_agendada": "2026-09-01", "status_contato": "invalido",
+                "situacao_manual_definida_em": "2026-08-01T00:00:00+00:00",
+            },
+            {
+                "id": "id-2", "chave_unica": "chave-2", "status": "pendente",
+                "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+            },
+        ]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({
+        "chave-1": {"selecionado": True},
+        "chave-2": {"status": sc.STATUS_FINALIZADO, "status_contato": None},
+    })
+
+    payload_por_chave = {p["chave_unica"]: p for p in _chamadas_upsert(cliente, "tratativas")[0]}
+    assert payload_por_chave["chave-1"]["status"] == "aguardando_resposta"
+    assert payload_por_chave["chave-1"]["data_agendada"] == "2026-09-01"
+    assert payload_por_chave["chave-1"]["status_contato"] == "invalido"
+    assert payload_por_chave["chave-1"]["situacao_manual_definida_em"] == "2026-08-01T00:00:00+00:00"
+    assert payload_por_chave["chave-2"]["status"] == sc.STATUS_FINALIZADO
+    assert payload_por_chave["chave-2"]["status_contato"] is None
 
 
 # --------------------------------------------------------------------------
@@ -764,6 +894,26 @@ def test_buscar_situacoes_veiculo_sga_em_lote_indexa_por_chassi(monkeypatch):
     assert resultado == {"CHASSI-001": linhas[0], "CHASSI-002": linhas[1]}
     chamadas_select = [c for c in cliente.chamadas if c[0] == "select"]
     assert chamadas_select[0][2] == [("in", "chassi", ["CHASSI-001", "CHASSI-002", "CHASSI-003"])]
+
+
+def test_buscar_situacoes_veiculo_sga_em_lote_converte_desde_de_iso_pra_datetime(monkeypatch):
+    """Achado 2026-08-25: `desde`/`atualizado_em` voltam do Postgres como
+    string ISO — sem converter aqui, `core.motor_regras_instalacao_
+    remocao._classificar_remocao` quebra com `TypeError` ao fazer
+    aritmética de data em cima de uma string."""
+    from datetime import datetime
+
+    linhas = [
+        {"chassi": "CHASSI-001", "status": "INATIVO", "desde": "2026-08-20T10:00:00+00:00",
+         "atualizado_em": "2026-08-25T09:00:00+00:00"},
+    ]
+    cliente = _ClienteFalso(retornos={"situacao_veiculo_sga": [linhas]})
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    resultado = sc.buscar_situacoes_veiculo_sga_em_lote(["CHASSI-001"])
+
+    assert resultado["CHASSI-001"]["desde"] == datetime.fromisoformat("2026-08-20T10:00:00+00:00")
+    assert resultado["CHASSI-001"]["atualizado_em"] == datetime.fromisoformat("2026-08-25T09:00:00+00:00")
 
 
 def test_buscar_situacoes_veiculo_sga_em_lote_lista_vazia_nao_chama_supabase(monkeypatch):

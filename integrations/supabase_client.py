@@ -545,6 +545,46 @@ def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]
 
 
 @retry_erro_transitorio_windows()
+def buscar_estado_atendente_por_chaves(chaves: list[str]) -> dict[str, dict]:
+    """Estado atual de `id`/`status`/`data_agendada`/`status_contato`/
+    `situacao_manual_definida_em` por `chave_unica` — usado por
+    `sincronizar_campos_atendente_em_lote` pra completar, em todo payload
+    de um lote heterogêneo, os campos que a linha da planilha não tocou
+    (ver docstring de `sincronizar_campos_atendente_em_lote`, achado
+    2026-08-25).
+
+    **Dividido em mini-lotes de `_TAMANHO_LOTE_TRATATIVAS` itens** (mesmo
+    achado 2026-08-21 de `buscar_estado_disparo_por_chaves`).
+
+    Devolve `{chave_unica: {...}}`; `{}` se `chaves` for vazio.
+    """
+    if not chaves:
+        return {}
+    client = get_client()
+    estado_por_chave: dict[str, dict] = {}
+    total_lotes = _total_lotes(len(chaves), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_chaves in enumerate(_em_lotes(chaves, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            linhas = (
+                client.table("tratativas")
+                .select("id, chave_unica, status, data_agendada, status_contato, situacao_manual_definida_em")
+                .in_("chave_unica", lote_chaves)
+                .execute()
+                .data
+            )
+        except Exception as e:
+            e.add_note(
+                f"buscar_estado_atendente_por_chaves: lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_chaves)}, chaves {lote_chaves[0]}..{lote_chaves[-1]})"
+            )
+            raise
+        for linha in linhas:
+            estado_por_chave[linha["chave_unica"]] = linha
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+    return estado_por_chave
+
+
+@retry_erro_transitorio_windows()
 def buscar_tratativa_por_chave(chave_unica: str) -> dict | None:
     """Tratativa completa por `chave_unica` — usado pela Fase F.4
     (`orchestrator.pipeline.etapa_processar_resultado_ligacao`) pra
@@ -561,13 +601,14 @@ def buscar_tratativa_por_chave(chave_unica: str) -> dict | None:
 
 @retry_erro_transitorio_windows()
 def sincronizar_campos_atendente(chave_unica: str, campos: dict) -> None:
-    """Grava de volta no Supabase os campos que só o atendente edita na
-    planilha Operacional (`Selecionado`, `Técnico`, `Situação Manual`,
-    `Data Agendada`, `Observação Manual`, `Discrepância revisada`, e
-    `status` quando `Finalizado` estiver marcado) — chamado pela Fase E
-    (`orchestrator.pipeline.etapa_publicar_fila_operacional`) antes de
-    `upsert_tratativa` reescrever os campos do motor, pra não perder
-    esse trabalho quando `reescrever_aba` limpar a aba inteira.
+    """Grava de volta no Supabase, PRA UMA linha só, campos que só o
+    atendente edita/aciona — usado pelos fluxos pontuais que reagem a 1
+    tratativa por vez (reconciliação de tratativa ausente, Fase F.4 de
+    retorno da ligação, Passo 4 de reprocessar retorno) onde não faz
+    sentido lotear. Pro caso de volume real (Fase E, `_sincronizar_
+    atendente_da_aba`, ~1.900 linhas de uma vez), ver `sincronizar_campos_
+    atendente_em_lote` (achado 2026-08-25: essa versão por-linha era o
+    gargalo de ~10-11min quando chamada em loop pra aba inteira).
 
     **Update puro, sem fallback de insert**: se `chave_unica` não
     existir (ex: linha de exemplo/placeholder ainda na planilha, ou
@@ -591,6 +632,90 @@ def sincronizar_campos_atendente(chave_unica: str, campos: dict) -> None:
         tratativa = buscar_tratativa_por_chave(chave_unica)
         if tratativa is not None:
             _registrar_transicao_status(tratativa["id"], campos["status"])
+
+
+@retry_erro_transitorio_windows()
+def sincronizar_campos_atendente_em_lote(atualizacoes: dict[str, dict]) -> None:
+    """Grava de volta no Supabase, em lote, os campos que só o atendente
+    edita na planilha Operacional (`Selecionado`, `Técnico`, `Situação
+    Manual`, `Data Agendada`, `Observação Manual`, `Discrepância
+    revisada`, e `status` quando `Finalizado` estiver marcado) — chamado
+    pela Fase E (`orchestrator.pipeline._sincronizar_atendente_da_aba`)
+    antes de `upsert_tratativa` reescrever os campos do motor, pra não
+    perder esse trabalho quando `reescrever_aba` limpar a aba inteira.
+
+    Recebe `{chave_unica: campos}` — 1 dict por linha da aba, montado
+    por `_sincronizar_atendente_da_aba`. Substitui, SÓ pra esse fluxo em
+    volume, o uso em loop de `sincronizar_campos_atendente` (1 update
+    síncrono + 1 select por LINHA — achado 2026-08-25: com a aba no
+    volume real pós-reset (~1.900 linhas), isso sozinho levava ~10-11min
+    tanto na Fase E quanto na etapa avulsa "Sincronizar seleção do
+    atendente", que por rodar síncrona no catálogo nem dava pra cancelar
+    no meio) pelo mesmo padrão já usado em `upsert_tratativas_em_lote`/
+    `buscar_estado_disparo_por_chaves`: poucas chamadas de rede em lote,
+    independente de N linhas. Os outros fluxos pontuais (1 tratativa por
+    vez) continuam usando `sincronizar_campos_atendente`.
+
+    **`campos` é heterogêneo por linha** (`data_agendada`/`status`/
+    `status_contato`/`situacao_manual_definida_em` só entram
+    condicionalmente — ver `orchestrator.pipeline._sincronizar_atendente_
+    da_aba`). Um upsert em lote do PostgREST monta o `ON CONFLICT DO
+    UPDATE` pela união de colunas de TODO o lote (mesmo achado já
+    documentado em `upsert_tratativas_em_lote`): uma linha sem `status`
+    no seu payload teria a coluna sobrescrita com `NULL` só porque outra
+    linha do mesmo lote tinha. Por isso o estado atual dessas 4 colunas
+    é buscado em lote primeiro (`buscar_estado_atendente_por_chaves`) e
+    sempre completado explicitamente em TODO payload.
+
+    **Update puro, sem fallback de insert**: `chave_unica` que não
+    existir (ex: linha de exemplo/placeholder ainda na planilha, ou
+    linha já removida) não entra no upsert — nunca cria uma linha nova
+    só com campos de atendente, sem os campos do motor.
+
+    Quando `campos` de uma linha inclui `"status"` (hoje só `STATUS_
+    FINALIZADO`), também seta `finalizado_em` (se ainda não vier em
+    `campos`) e grava a transição no histórico pra cada uma dessas
+    linhas (subconjunto pequeno — só quem tem "Finalizado" marcado, não
+    a aba inteira).
+    """
+    if not atualizacoes:
+        return
+    estado_atual = buscar_estado_atendente_por_chaves(list(atualizacoes))
+
+    campos_preservados = ("data_agendada", "status", "status_contato", "situacao_manual_definida_em")
+    payloads = []
+    for chave, campos in atualizacoes.items():
+        estado = estado_atual.get(chave)
+        if estado is None:
+            continue
+        payload = {"chave_unica": chave, **campos}
+        for campo in campos_preservados:
+            if campo not in payload:
+                payload[campo] = estado.get(campo)
+        if "status" in campos:
+            payload.setdefault("finalizado_em", _agora_utc_iso())
+        payloads.append(payload)
+
+    client = get_client()
+    total_lotes = _total_lotes(len(payloads), _TAMANHO_LOTE_TRATATIVAS)
+    for indice, lote_payloads in enumerate(_em_lotes(payloads, _TAMANHO_LOTE_TRATATIVAS), start=1):
+        try:
+            client.table("tratativas").upsert(lote_payloads, on_conflict="chave_unica").execute()
+        except Exception as e:
+            chaves_lote = [p["chave_unica"] for p in lote_payloads]
+            e.add_note(
+                f"sincronizar_campos_atendente_em_lote: upsert, lote {indice}/{total_lotes} "
+                f"(tamanho={len(lote_payloads)}, chaves {chaves_lote[0]}..{chaves_lote[-1]})"
+            )
+            raise
+        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+
+    for chave, campos in atualizacoes.items():
+        if "status" not in campos:
+            continue
+        estado = estado_atual.get(chave)
+        if estado is not None:
+            _registrar_transicao_status(estado["id"], campos["status"])
 
 
 @retry_erro_transitorio_windows()
@@ -891,6 +1016,16 @@ def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
     porque o checkpoint de Fase D (`_situacoes_veiculo_sga_recentes`) hoje
     reduz a lista antes de chegar aqui, mas o risco é real e crescente com
     o volume de Instalação/Remoção).
+
+    `desde`/`atualizado_em` voltam do Postgres como string ISO — convertidos
+    pra `datetime` aqui (achado 2026-08-25: sem isso, `atualizar_situacao_
+    sga` reaproveita `desde` cru quando o status não muda, e `core.
+    motor_regras_instalacao_remocao._classificar_remocao` faz aritmética de
+    data em cima — `TypeError` só aparecia na prática quando um chassi já
+    tinha `registro_anterior` real, o que exige pelo menos uma consulta SGA
+    bem-sucedida anterior; nunca bateu em teste isolado/reset completo).
+    Espelha a conversão inversa já feita em `upsert_situacoes_veiculo_sga_
+    em_lote`.
     """
     if not chassis:
         return {}
@@ -913,6 +1048,9 @@ def buscar_situacoes_veiculo_sga_em_lote(chassis: list[str]) -> dict[str, dict]:
             )
             raise
         for linha in linhas:
+            for campo in ("desde", "atualizado_em"):
+                if isinstance(linha.get(campo), str):
+                    linha[campo] = datetime.fromisoformat(linha[campo])
             situacao_por_chassi[linha["chassi"]] = linha
         sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
     return situacao_por_chassi

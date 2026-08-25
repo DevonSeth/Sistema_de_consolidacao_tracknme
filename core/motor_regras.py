@@ -56,6 +56,7 @@ from core.normalizacao import normalizar_placa, normalizar_telefone_e164
 
 CODIGO_REGRA_SGA_INATIVO = "REGRA_SGA_INATIVO"
 CODIGO_REGRA_SGA_NAO_ENCONTRADO = "REGRA_SGA_NAO_ENCONTRADO"
+CODIGO_REGRA_MANUTENCAO_DIVERGENCIA_SGA = "REGRA_MANUTENCAO_DIVERGENCIA_SGA"
 
 _FORMATOS_DATA = ("%d/%m/%Y %H:%M:%S", "%d/%m/%Y")
 
@@ -735,6 +736,29 @@ def _sobrescrever_linha_com_sga(linha: dict, codigo_regra: str, status_sga: str,
     return nova_linha
 
 
+def _montar_linha_divergencia_manutencao(linha_com_sga: dict, status: str, templates: dict) -> dict:
+    """Monta uma linha da aba "Análise de Divergência - Manutenção"
+    (2026-08-25) a partir da `linha` já sobrescrita no branch `else` de
+    `aplicar_situacoes_sga` (SGA divergente de ATIVO/NÃO ENCONTRADO --
+    ex: INATIVO, INADIMPLENTE, CANCELADO). Não muda o fechamento
+    automático em si (`REGRA_SGA_INATIVO` continua fechando o incidente
+    sozinho) -- só dá visibilidade da ocorrência (equipamento que devia
+    ter sido removido fisicamente e não foi). Mesmo espírito de
+    `core.motor_regras_instalacao_remocao._montar_linha_divergencia_
+    remocao`, mas sem "Motivo" (só existe 1 causa possível aqui)."""
+    template = templates.get(CODIGO_REGRA_MANUTENCAO_DIVERGENCIA_SGA, {})
+    valores = _FormatoSeguro(status_sga=status)
+    return {
+        "chassi": linha_com_sga.get("chassi", ""),
+        "placa": linha_com_sga.get("placa", ""),
+        "cliente": linha_com_sga.get("cliente", ""),
+        "evento": linha_com_sga.get("evento", ""),
+        "status_sga": status,
+        "observacao": str(template.get("template_observacao") or "").format_map(valores),
+        "acao": str(template.get("template_acao") or "").format_map(valores),
+    }
+
+
 def aplicar_situacoes_sga(resultado: dict, situacoes_sga: dict[str, dict], templates: dict) -> dict:
     """Segunda passada, depois de `classificar_incidentes` — roda só
     quando o SGA já foi consultado (decisão do usuário, 2026-08-07: o
@@ -756,6 +780,15 @@ def aplicar_situacoes_sga(resultado: dict, situacoes_sga: dict[str, dict], templ
                                                  tratamento; se reativar, o
                                                  sistema recaptura sozinho
                                                  nos critérios que já existem.
+                                                 Também gera um item em
+                                                 `divergencias_manutencao`
+                                                 (2026-08-25) — dá
+                                                 visibilidade do fechamento
+                                                 automático (equipamento
+                                                 que devia ter sido
+                                                 removido fisicamente e não
+                                                 foi) sem mudar o
+                                                 comportamento.
     Essa regra tem prioridade sobre qualquer classificação da cascata
     original, mesmo uma já resolvida automaticamente (ex: REGRA_2).
     Chassi sem entrada em `situacoes_sga` (não consultado) mantém a
@@ -765,6 +798,7 @@ def aplicar_situacoes_sga(resultado: dict, situacoes_sga: dict[str, dict], templ
     """
     grupo_2: list[dict] = []
     grupo_3: list[dict] = []
+    divergencias_manutencao: list[dict] = []
     candidatos = [(linha, "grupo_2_concluir") for linha in resultado["grupo_2_concluir"]]
     candidatos += [(linha, "grupo_3_tratativa_humana") for linha in resultado["grupo_3_tratativa_humana"]]
 
@@ -788,9 +822,11 @@ def aplicar_situacoes_sga(resultado: dict, situacoes_sga: dict[str, dict], templ
             grupo_3.append(_sobrescrever_linha_com_sga(linha_com_sga, CODIGO_REGRA_SGA_NAO_ENCONTRADO, status, templates))
         else:
             grupo_2.append(_sobrescrever_linha_com_sga(linha_com_sga, CODIGO_REGRA_SGA_INATIVO, status, templates))
+            divergencias_manutencao.append(_montar_linha_divergencia_manutencao(linha_com_sga, status, templates))
 
     return {
         "grupo_1_abrir": resultado["grupo_1_abrir"],
         "grupo_2_concluir": grupo_2,
         "grupo_3_tratativa_humana": grupo_3,
+        "divergencias_manutencao": divergencias_manutencao,
     }

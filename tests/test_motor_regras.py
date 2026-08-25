@@ -818,6 +818,10 @@ class TestAplicarSituacoesSga:
             "template_observacao": "SGA não encontrou esse chassi.",
             "nivel_urgencia": 2,
         },
+        "REGRA_MANUTENCAO_DIVERGENCIA_SGA": {
+            "template_acao": "Cancelar contrato manualmente",
+            "template_observacao": "Status SGA {status_sga}, mas o equipamento segue comunicando",
+        },
     }
 
     def _linha(self, chassi, codigo_regra="REGRA_1", **extra):
@@ -918,3 +922,43 @@ class TestAplicarSituacoesSga:
         final = aplicar_situacoes_sga(resultado, {"CHASSI-006": {"status": "INATIVO"}}, self.TEMPLATES)
 
         assert final["grupo_1_abrir"] == [candidato_abertura]
+
+    def test_status_inativo_gera_divergencia_manutencao_com_texto_interpolado(self):
+        linha_g3 = self._linha("CHASSI-010")
+        resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [], "grupo_3_tratativa_humana": [linha_g3]}
+
+        final = aplicar_situacoes_sga(resultado, {"CHASSI-010": {"status": "INADIMPLENTE"}}, self.TEMPLATES)
+
+        assert len(final["divergencias_manutencao"]) == 1
+        divergencia = final["divergencias_manutencao"][0]
+        assert divergencia["chassi"] == "CHASSI-010"
+        assert divergencia["placa"] == "ABC1234"
+        assert divergencia["cliente"] == "Fulano"
+        assert divergencia["evento"] == ""
+        assert divergencia["status_sga"] == "INADIMPLENTE"
+        assert divergencia["observacao"] == "Status SGA INADIMPLENTE, mas o equipamento segue comunicando"
+        assert divergencia["acao"] == "Cancelar contrato manualmente"
+
+    def test_status_ativo_nao_gera_divergencia_manutencao(self):
+        linha_g3 = self._linha("CHASSI-011")
+        resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [], "grupo_3_tratativa_humana": [linha_g3]}
+
+        final = aplicar_situacoes_sga(resultado, {"CHASSI-011": {"status": "ATIVO"}}, self.TEMPLATES)
+
+        assert final["divergencias_manutencao"] == []
+
+    def test_nao_encontrado_nao_gera_divergencia_manutencao(self):
+        linha_g2 = self._linha("CHASSI-012", codigo_regra="REGRA_2")
+        resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [linha_g2], "grupo_3_tratativa_humana": []}
+
+        final = aplicar_situacoes_sga(resultado, {"CHASSI-012": {"status": "NÃO ENCONTRADO"}}, self.TEMPLATES)
+
+        assert final["divergencias_manutencao"] == []
+
+    def test_chassi_sem_entrada_nao_gera_divergencia_manutencao(self):
+        linha_g3 = self._linha("CHASSI-013")
+        resultado = {"grupo_1_abrir": [], "grupo_2_concluir": [], "grupo_3_tratativa_humana": [linha_g3]}
+
+        final = aplicar_situacoes_sga(resultado, {}, self.TEMPLATES)
+
+        assert final["divergencias_manutencao"] == []

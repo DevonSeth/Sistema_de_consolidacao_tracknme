@@ -253,15 +253,28 @@ class TestClassificarRemocao:
         situacao_sga = {"status": "NÃO ENCONTRADO", "desde": date(2026, 8, 1)}
         assert _classificar_remocao(registro, None, situacao_sga, self.AGORA) is None
 
-    def test_prazo_sem_equipamento_e_bloqueado_por_falta_de_modelo(self):
-        """Bloco B (2026-08-24), decisão confirmada: sem equipamento
-        encontrado não há 'Modelo do Equipamento' pra confirmar contra a
-        lista permitida — bloqueia igual a um modelo fora da lista, vira
-        divergência em vez de tratativa (mesmo com a lista configurada)."""
+    def test_prazo_sem_equipamento_nao_e_mais_bloqueado(self):
+        """Decisão revertida em 2026-08-25: sem equipamento encontrado não
+        bloqueia mais como 'modelo não permitido' — vira tratativa normal
+        (REGRA_REMOCAO_PRAZO_{tier}), esteira de disparo padrão. Motivo:
+        dado real mostrou que 2199 das 2213 divergências de Remoção eram
+        esse caso, escondendo quase toda remoção pendente atrás do rótulo
+        de 'modelo não permitido' (só 3 eram modelo genuinamente fora da
+        lista)."""
         registro = _registro(servico="Retirada")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
         codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA, self.MODELO_PERMITIDO)
-        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
+        assert codigo == "REGRA_REMOCAO_PRAZO_NORMAL"
+        assert dias == 5
+
+    def test_prazo_sem_equipamento_ignora_modelos_removiveis_vazio(self):
+        """Mesmo com `modelos_removiveis` vazio (bloquearia tudo que TEM
+        equipamento encontrado), sem equipamento o filtro de modelo nem é
+        avaliado — continua virando tratativa normal."""
+        registro = _registro(servico="Retirada")
+        situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
+        codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA, {})
+        assert codigo == "REGRA_REMOCAO_PRAZO_NORMAL"
         assert dias == 5
 
     def test_ativa_quando_chassi_encontrado_nome_bate_e_modelo_permitido(self):
@@ -327,13 +340,14 @@ class TestClassificarRemocao:
     def test_tier_remocao_customizado_via_parametros(self):
         """5 dias seria NORMAL na faixa padrão — com uma faixa
         customizada onde URGENTE já começa em 3 dias, muda de verdade
-        (confirmado no `dias` retornado, já que sem equipamento o
-        código final vira sempre EQUIPAMENTO_NAO_PERMITIDO agora)."""
+        (agora refletido direto no código final, já que sem equipamento
+        não bloqueia mais — ver test_prazo_sem_equipamento_nao_e_mais_
+        bloqueado)."""
         registro = _registro(servico="Retirada")
         situacao_sga = {"status": "INATIVO", "desde": date(2026, 8, 1)}
         parametros = {"tier_remocao": "21=URGENTE,11=ALTA,3=URGENTE_RAPIDO,1=NORMAL"}
         codigo, dias = _classificar_remocao(registro, None, situacao_sga, self.AGORA, parametros)
-        assert codigo == "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO"
+        assert codigo == "REGRA_REMOCAO_PRAZO_URGENTE_RAPIDO"
         assert dias == 5
 
 

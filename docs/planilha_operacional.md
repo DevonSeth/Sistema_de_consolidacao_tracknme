@@ -505,6 +505,43 @@ de Divergência - Remoção" na planilha real antes do primeiro
 Divergência - Instalação") — sem isso a Fase E quebra tentando escrever
 numa aba inexistente.
 
+## Aba nova "Análise de Divergência - Manutenção" — 2026-08-25
+
+Mesmo espírito das duas abas acima (relatório mecânico, sem fila de
+atendimento, reescrita do zero a cada ciclo), pra dar visibilidade de um
+caso que já existia antes, sem alterar o comportamento: quando o SGA
+retorna qualquer status diferente de `ATIVO`/`NÃO ENCONTRADO` (ex:
+`INATIVO`, `INADIMPLENTE`, `CANCELADO`) pra um veículo de Manutenção,
+`REGRA_SGA_INATIVO` continua fechando o incidente automaticamente no
+Track N'Me — só que agora também gera uma linha aqui
+(`REGRA_MANUTENCAO_DIVERGENCIA_SGA`), sinalizando equipamento que devia
+ter sido removido fisicamente e não foi. `REGRA_SGA_NAO_ENCONTRADO`
+(chassi não encontrado no SGA) não entra nessa regra. Ver
+`docs/regras_negocio.md`, seção "SGA — terceira passada", pra critério
+completo.
+
+**Cabeçalho** (`CABECALHO_ANALISE_DIVERGENCIA_MANUTENCAO`,
+`integrations/google_sheets_client.py`):
+
+```
+ID (hash)                                -- mesma fórmula de hash de Manutenção (placa+evento)
+Chassi
+Placa
+Cliente
+Evento
+Status SGA                               -- status vivo consultado (INATIVO/INADIMPLENTE/CANCELADO/etc)
+Observação
+Ação
+```
+
+Alimentada por `etapa_publicar_fila_operacional` (Fase E), mesmo padrão
+mecânico das abas de Instalação/Remoção. **Pendente**: criar a worksheet
+"Análise de Divergência - Manutenção" na planilha real antes do primeiro
+`reescrever_aba` (mesmo processo já usado pra "Alertas"/"Análise de
+Divergência - Instalação"/"- Remoção") e inserir `REGRA_MANUTENCAO_
+DIVERGENCIA_SGA` em `rule_templates` — sem isso a Fase E quebra
+tentando escrever numa aba inexistente ou grava Observação/Ação vazias.
+
 ## Correção de validação/cabeçalho — achado e resolvido 2026-08-14
 
 Achado ao vivo (print do usuário): a coluna "Tentativa 2" (Tratativas)

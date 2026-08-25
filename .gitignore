@@ -20,6 +20,12 @@ config/*.enc
 *.pfx
 supabase/.temp/
 
+# Planilhas exportadas com dado real de cliente (ex: migração de
+# Instalação-Remoção legada) — o repositório é público, nunca versionar
+# (achado 2026-08-25: "Pendencia - PUMA - novas  (1).xlsx" ficou solta na
+# raiz do projeto, não-rastreada, com nome/CPF/telefone reais).
+*.xlsx
+
 # Artefatos de build do PyInstaller (Fase 1, passos 1.3/1.4) — gerados
 # localmente por `pyinstaller PainelOperador.spec`/`pyinstaller
 # Launcher.spec`, nunca versionados (centenas de MB, inclui o Chromium

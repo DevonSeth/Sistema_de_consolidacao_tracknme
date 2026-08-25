@@ -202,6 +202,16 @@ CABECALHO_ANALISE_DIVERGENCIA_REMOCAO = [
     "Modelo do Equipamento", "Status SGA", "Motivo", "Observação", "Ação",
 ]
 
+# Manutenção (2026-08-25) — mesmo espírito das duas acima, mas pro caso
+# em que o SGA diverge de ATIVO (INATIVO/INADIMPLENTE/CANCELADO/etc) mas
+# o equipamento segue comunicando -- REGRA_SGA_INATIVO continua fechando
+# o incidente automaticamente (comportamento inalterado); esta aba só dá
+# visibilidade. Só existe 1 causa possível, por isso sem "Motivo".
+CABECALHO_ANALISE_DIVERGENCIA_MANUTENCAO = [
+    "ID (hash)", "Chassi", "Placa", "Cliente", "Evento",
+    "Status SGA", "Observação", "Ação",
+]
+
 _CABECALHOS_OPERACIONAL = {
     "Tratativas": CABECALHO_TRATATIVAS,
     "Pendente de Ligação": CABECALHO_PENDENTE_LIGACAO,
@@ -209,6 +219,7 @@ _CABECALHOS_OPERACIONAL = {
     "Alertas": CABECALHO_ALERTAS,
     "Análise de Divergência - Instalação": CABECALHO_ANALISE_DIVERGENCIA_INSTALACAO,
     "Análise de Divergência - Remoção": CABECALHO_ANALISE_DIVERGENCIA_REMOCAO,
+    "Análise de Divergência - Manutenção": CABECALHO_ANALISE_DIVERGENCIA_MANUTENCAO,
 }
 
 
@@ -285,6 +296,21 @@ def reescrever_aba(planilha: str, aba: str, linhas: list[dict]) -> None:
     """Limpa a aba inteira e reescreve do zero (nunca edita célula a
     célula) — só permitido na planilha Operacional; o Administrador é
     somente leitura pelo sistema.
+
+    **Reaplica a validação de checkbox logo depois de escrever** em
+    "Tratativas"/"Pendente de Ligação" (achado 2026-08-25: confirmado 2x
+    ao vivo que os checkboxes BOOLEAN somem depois do ciclo `clear()`+
+    `update()` desta função — a documentação da API do Sheets diz que
+    nem `values.clear` nem `values.update` deveriam tocar validação, mas
+    o comportamento real observado é esse. Em vez de perseguir mais a
+    causa exata do lado da API, a aba fica auto-curativa: toda escrita
+    real já deixa o checkbox funcionando de novo, sem depender de rerun
+    manual de `configurar_checkboxes_tratativas`/`configurar_checkbox_
+    finalizado_pendente_ligacao`). Os dropdowns (Situação Manual/
+    Atendimento/Base/Ponto de Ação) não foram afetados nesse achado e
+    continuam fora daqui — `configurar_validacao_atendimento` depende de
+    `nomes_bases`/`nomes_pontos_acao` externos (Supabase), que este
+    módulo não conhece.
     """
     if planilha != NOME_PLANILHA_OPERACIONAL:
         raise ValueError(
@@ -298,6 +324,11 @@ def reescrever_aba(planilha: str, aba: str, linhas: list[dict]) -> None:
     ws = _worksheet(planilha, aba)
     ws.clear()
     ws.update(values=[cabecalho] + corpo, value_input_option=ValueInputOption.user_entered)
+
+    if aba == "Tratativas":
+        configurar_checkboxes_tratativas()
+    elif aba == "Pendente de Ligação":
+        configurar_checkbox_finalizado_pendente_ligacao()
 
 
 _COR_VERDE = convert_hex_to_colors_dict("#B7E1CD")
@@ -561,12 +592,16 @@ def configurar_validacao_atendimento(
 
 
 def _configurar_checkbox(aba: str, coluna: str) -> None:
+    """`showCustomUi=True` é obrigatório aqui pelo mesmo motivo já achado
+    pros dropdowns (2026-08-14/15, ver `configurar_validacao_atendimento`):
+    é esse campo que faz o Sheets desenhar o widget de checkbox de
+    verdade na célula, não só validar o valor por baixo."""
     cabecalho = _CABECALHOS_OPERACIONAL[aba]
     ws = _worksheet(NOME_PLANILHA_OPERACIONAL, aba)
     _garantir_linhas_minimas(ws, _LINHA_LIMITE_VALIDACAO)
     letra = _coluna_letra(cabecalho.index(coluna) + 1)
     intervalo = f"{letra}2:{letra}{_LINHA_LIMITE_VALIDACAO}"
-    ws.add_validation(intervalo, ValidationConditionType.boolean, [], strict=True)
+    ws.add_validation(intervalo, ValidationConditionType.boolean, [], strict=True, showCustomUi=True)
 
 
 @retry_erro_transitorio_windows()
@@ -694,6 +729,7 @@ def configurar_validacao_status_puma() -> None:
 _ABAS_CABECALHO_FORMATADO = [
     "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma",
     "Alertas", "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
+    "Análise de Divergência - Manutenção",
 ]
 _COR_CABECALHO_FUNDO_SISTEMA = convert_hex_to_colors_dict("#0A1B5E")
 _COR_CABECALHO_FUNDO_EQUIPE = convert_hex_to_colors_dict("#0046B0")
@@ -724,6 +760,7 @@ _COLUNAS_EQUIPE_POR_ABA: dict[str, set[str]] = {
     "Alertas": {"Ação", "Data Agendada"},
     "Análise de Divergência - Instalação": set(),
     "Análise de Divergência - Remoção": set(),
+    "Análise de Divergência - Manutenção": set(),
 }
 
 

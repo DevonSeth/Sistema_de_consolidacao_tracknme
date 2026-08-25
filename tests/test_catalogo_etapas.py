@@ -142,6 +142,37 @@ async def test_executar_etapas_com_contexto_para_na_primeira_falha(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executar_etapas_com_contexto_excecao_nao_tratada_vira_falha(monkeypatch):
+    """Achado 2026-08-25: `etapa_enriquecimento_sga` tem código de
+    preparação sem try/except próprio -- uma exceção real ali (ex: falha
+    ao ler a aba Instalação-Remoção) não pode escapar até `ui.app.
+    _rodar_cadeia` sem nunca logar nem liberar a trava. Confirma que a
+    exceção vira um `ResultadoEtapa(sucesso=False)` normal, com a cadeia
+    parando do jeito de sempre (não repropaga)."""
+    chamou_b = False
+
+    async def _etapa_a():
+        raise RuntimeError("falha de preparação, sem try/except próprio")
+
+    async def _etapa_b():
+        nonlocal chamou_b
+        chamou_b = True
+        return _resultado("b")
+
+    monkeypatch.setattr(pipeline, "etapa_fake_a", _etapa_a, raising=False)
+    monkeypatch.setattr(pipeline, "etapa_fake_b", _etapa_b, raising=False)
+
+    etapas = [_etapa_fake("a", "etapa_fake_a"), _etapa_fake("b", "etapa_fake_b")]
+    execucao = await cat.executar_etapas_com_contexto(etapas, {})
+
+    assert execucao.motivo_parada == "falha"
+    assert execucao.resultados[0].sucesso is False
+    assert "RuntimeError" in execucao.resultados[0].mensagem
+    assert "falha de preparação" in execucao.resultados[0].mensagem
+    assert chamou_b is False
+
+
+@pytest.mark.asyncio
 async def test_executar_etapas_com_contexto_para_em_aguardando_reconexao(monkeypatch):
     async def _etapa_a():
         return _resultado("a", sucesso=False, aguardando_reconexao={"pendentes": ["x"]})
@@ -279,7 +310,10 @@ async def test_cadeia_real_enriquecimento_sga_roda_uma_vez_so(monkeypatch):
         assert dados_sga == {"situacoes_sga": {}}
         return pipeline.ResultadoEtapa(
             "consolidar_com_sga", sucesso=True,
-            dados={"grupo_2_concluir": [], "fila_operacional": [], "divergencias_instalacao": []},
+            dados={
+                "grupo_2_concluir": [], "fila_operacional": [], "divergencias_instalacao": [],
+                "divergencias_remocao": [], "divergencias_manutencao": [],
+            },
         )
 
     monkeypatch.setattr(pipeline, "etapa_motor_de_regras", _motor_de_regras_fake)
@@ -292,6 +326,50 @@ async def test_cadeia_real_enriquecimento_sga_roda_uma_vez_so(monkeypatch):
 
     assert execucao.motivo_parada is None
     assert chamadas_sga == 1
+
+
+@pytest.mark.asyncio
+async def test_cadeia_real_divergencias_remocao_e_manutencao_chegam_em_publicar_fila(monkeypatch):
+    """Achado real 2026-08-25: `divergencias_remocao`/`divergencias_
+    manutencao` foram implementadas em `orchestrator/pipeline.py` (Bloco
+    B + Manutenção), mas nunca ganharam entrada em `EtapaCatalogo.saidas`
+    (consolidar_com_sga) nem `entradas` (publicar_fila_operacional) --
+    a lógica de classificação calculava certo, mas a cadeia real (só
+    `kwargs_para`/`registrar_saidas`, nunca chamada direto pelos testes
+    unitários de `etapa_publicar_fila_operacional`) nunca repassava esse
+    dado -- as 2 abas ficavam sempre vazias em produção, só `divergencias_
+    instalacao` (com wiring desde o Bloco B original) funcionava. Este
+    teste roda a cadeia REAL (`resolver_etapas`, sem pular a etapa
+    seguinte) pra pegar exatamente esse tipo de gap de novo."""
+    async def _consolidar_com_sga_fake(dados_classificacao=None, dados_sga=None, equipamentos=None, instalacao_remocao=None):
+        return pipeline.ResultadoEtapa(
+            "consolidar_com_sga", sucesso=True,
+            dados={
+                "grupo_2_concluir": [], "fila_operacional": [],
+                "divergencias_instalacao": ["div-instalacao"],
+                "divergencias_remocao": ["div-remocao"],
+                "divergencias_manutencao": ["div-manutencao"],
+            },
+        )
+
+    recebido = {}
+
+    async def _publicar_fila_fake(fila_operacional=None, divergencias_instalacao=None, divergencias_remocao=None, divergencias_manutencao=None):
+        recebido["divergencias_instalacao"] = divergencias_instalacao
+        recebido["divergencias_remocao"] = divergencias_remocao
+        recebido["divergencias_manutencao"] = divergencias_manutencao
+        return pipeline.ResultadoEtapa("publicar_fila_operacional", sucesso=True, dados={})
+
+    monkeypatch.setattr(pipeline, "etapa_consolidar_com_sga", _consolidar_com_sga_fake)
+    monkeypatch.setattr(pipeline, "etapa_publicar_fila_operacional", _publicar_fila_fake)
+
+    ids = ["consolidar_com_sga", "publicar_fila_operacional"]
+    execucao = await cat.executar_etapas_com_contexto(cat.resolver_etapas("selecionadas", ids), {})
+
+    assert execucao.motivo_parada is None
+    assert recebido["divergencias_instalacao"] == ["div-instalacao"]
+    assert recebido["divergencias_remocao"] == ["div-remocao"]
+    assert recebido["divergencias_manutencao"] == ["div-manutencao"]
 
 
 # --- executar_cadeia / trava de execução concorrente -------------------------
@@ -361,6 +439,49 @@ async def test_executar_cadeia_libera_trava_em_falha(monkeypatch):
     execucao = await cat.executar_cadeia(["baixar_relatorios"], "selecionadas")
 
     assert execucao.motivo_parada == "falha"
+    assert liberou == [True]
+
+
+@pytest.mark.asyncio
+async def test_executar_cadeia_libera_trava_em_excecao_nao_tratada_da_etapa(monkeypatch):
+    """Mesmo achado 2026-08-25 do teste equivalente de `executar_etapas_
+    com_contexto`, mas verificando de ponta a ponta que a trava é
+    liberada -- é o sintoma real observado ao vivo (trava presa, sem
+    log, sem jeito de cancelar pela UI)."""
+    monkeypatch.setattr(cat.supabase_client, "adquirir_execucao_lock", lambda maquina: True)
+    liberou = []
+    monkeypatch.setattr(cat.supabase_client, "liberar_execucao_lock", lambda: liberou.append(True))
+
+    async def _baixar_excecao():
+        raise RuntimeError("falha de preparação, sem try/except próprio")
+
+    monkeypatch.setattr(pipeline, "etapa_baixar_relatorios", _baixar_excecao)
+
+    execucao = await cat.executar_cadeia(["baixar_relatorios"], "selecionadas")
+
+    assert execucao.motivo_parada == "falha"
+    assert liberou == [True]
+
+
+@pytest.mark.asyncio
+async def test_executar_cadeia_libera_trava_e_repropaga_se_excecao_escapar_do_loop(monkeypatch):
+    """Defesa em profundidade: mesmo que algo inesperado escape de
+    `executar_etapas_com_contexto` inteiro (não só de 1 etapa -- esse já
+    é protegido pelo teste acima), a trava não pode ficar presa. Esse
+    caso repropaga (quem chamou precisa saber que quebrou de verdade,
+    diferente de uma falha normal de etapa)."""
+    monkeypatch.setattr(cat.supabase_client, "adquirir_execucao_lock", lambda maquina: True)
+    liberou = []
+    monkeypatch.setattr(cat.supabase_client, "liberar_execucao_lock", lambda: liberou.append(True))
+
+    async def _executar_etapas_explode(*args, **kwargs):
+        raise RuntimeError("algo quebrou fora da chamada de qualquer etapa")
+
+    monkeypatch.setattr(cat, "executar_etapas_com_contexto", _executar_etapas_explode)
+
+    with pytest.raises(RuntimeError, match="algo quebrou fora"):
+        await cat.executar_cadeia(["baixar_relatorios"], "selecionadas")
+
     assert liberou == [True]
 
 
@@ -549,6 +670,33 @@ async def test_retomar_etapa_enriquecimento_sga_repassa_alvos_override(monkeypat
     assert alvos_recebidos == alvos_originais
     assert resultado.dados["alvos_consulta_sga"] == alvos_originais
     assert resultado.dados["situacoes_sga"] == {"X1": {"status": "ATIVO"}, "X2": {"status": "ATIVO"}}
+
+
+@pytest.mark.asyncio
+async def test_retomar_etapa_enriquecimento_sga_excecao_nao_tratada_vira_falha(monkeypatch):
+    """Mesmo achado 2026-08-25 do resto do arquivo, mas no caminho de
+    retomada pós-reconexão -- `pipeline.etapa_enriquecimento_sga` é
+    chamada direto aqui, fora do loop de `executar_etapas_com_contexto`
+    (que já está protegido), então precisa do próprio try/except."""
+    async def _enriquecimento_sga_excecao(chassis_override=None, alvos_override=None):
+        raise RuntimeError("sessão do SGA caiu de um jeito inesperado")
+
+    monkeypatch.setattr(pipeline, "etapa_enriquecimento_sga", _enriquecimento_sga_excecao)
+
+    etapa = cat.etapa_por_id("enriquecimento_sga")
+    resultado_travado = pipeline.ResultadoEtapa(
+        "enriquecimento_sga", sucesso=False,
+        dados={"situacoes_sga": {"X1": {"status": "ATIVO"}}, "falhas": [], "alvos_consulta_sga": {}},
+        aguardando_reconexao={"pendentes": ["X2"]},
+    )
+
+    resultado = await cat.retomar_etapa(etapa, resultado_travado)
+
+    assert resultado.sucesso is False
+    assert "RuntimeError" in resultado.mensagem
+    assert "sessão do SGA caiu" in resultado.mensagem
+    # não perde o que já tinha sido persistido antes da queda
+    assert resultado.dados["situacoes_sga"] == {"X1": {"status": "ATIVO"}}
 
 
 @pytest.mark.asyncio

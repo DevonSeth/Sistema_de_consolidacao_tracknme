@@ -14,10 +14,19 @@ contador completamente separado):
     Round 1: cada item tenta até `max_tentativas` vezes; falha não trava a
         fila, segue pro próximo item.
     Round 2: depois que a fila inteira passar pela primeira rodada, só os
-        itens que falharam tentam mais `max_tentativas` vezes.
+        itens que falharam (e não são `definitivo`, ver abaixo) tentam
+        mais `max_tentativas` vezes.
     Ainda falhando depois disso -> item marcado como falho no resultado
         final, nunca descartado silenciosamente (quem chama decide o que
         fazer, ex: sinalizar pro atendente).
+
+Erro de NEGÓCIO definitivo (achado 2026-08-25, volume real pós-reset):
+    `eh_erro_definitivo` (opcional, default `None` -- sem mudança de
+    comportamento) deixa quem chama marcar uma exceção como resultado
+    determinístico (ex: Track N' Me recusando abrir um incidente que já
+    está aberto -- tentar de novo nunca muda o resultado). Um item assim
+    pára na hora (não gasta as tentativas restantes) e nunca entra no
+    round 2 -- evita reprocessar milhares de itens à toa em volume alto.
 
 Falha de SESSÃO (deslogou, site fora do ar, recaptcha expirou) é diferente
 de falha de item: a `acao` deve levantar `SessaoCaidaError` quando detectar
@@ -46,6 +55,7 @@ class ResultadoItem:
     resultado: Any = None
     erro: str | None = None
     tentativas: int = 0
+    definitivo: bool = False
 
 
 class AguardandoReconexao(Exception):
@@ -79,6 +89,7 @@ async def _executar_com_tentativas(
     acao: Callable[[Any, Any], Awaitable[Any]],
     max_tentativas: int,
     timeout_segundos: float | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> ResultadoItem:
     """`timeout_segundos` (achado 2026-08-20): quando informado, cada
     tentativa é envolvida em `asyncio.wait_for`, dobrando a cada retry
@@ -90,7 +101,17 @@ async def _executar_com_tentativas(
     numa rodada real do SGA, sem erro nenhum). `None` (default) preserva o
     comportamento de antes -- usado só pelos 2 call sites HTTP
     (`_rodar_round_http`); o caminho Playwright com página real
-    (`_rodar_round`) já tem timeouts granulares em cada ação da página."""
+    (`_rodar_round`) já tem timeouts granulares em cada ação da página.
+
+    `eh_erro_definitivo` (achado 2026-08-25, volume real pós-reset com
+    1671 itens): quando informado e devolve `True` pra uma exceção
+    capturada, pára na hora -- sem gastar as tentativas restantes nem
+    devolver o item pra retentar depois (`ResultadoItem.definitivo=True`,
+    ver `processar_fila`/`processar_fila_http`). Existe pra erro de
+    NEGÓCIO determinístico (ex: Track N'Me `IncidenteDuplicadoError` --
+    incidente já aberto/já concluído, nunca muda tentando de novo),
+    nunca pra falha técnica -- `None` (default) preserva o comportamento
+    de sempre tentar `max_tentativas` vezes."""
     ultimo_erro: str | None = None
     for tentativa in range(1, max_tentativas + 1):
         try:
@@ -107,6 +128,10 @@ async def _executar_com_tentativas(
                 await asyncio.sleep(2**tentativa)
         except Exception as e:  # noqa: BLE001 - queremos capturar qualquer falha técnica do item
             ultimo_erro = str(e)
+            if eh_erro_definitivo is not None and eh_erro_definitivo(e):
+                return ResultadoItem(
+                    item=item, sucesso=False, erro=ultimo_erro, tentativas=tentativa, definitivo=True
+                )
             if tentativa < max_tentativas:
                 await asyncio.sleep(2**tentativa)
     return ResultadoItem(item=item, sucesso=False, erro=ultimo_erro, tentativas=max_tentativas)
@@ -121,6 +146,7 @@ async def _rodar_round(
     on_item_concluido: Callable[[], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> tuple[list[ResultadoItem], SessaoCaidaError | None, list, bool]:
     fila: asyncio.Queue = asyncio.Queue()
     for item in itens:
@@ -145,7 +171,9 @@ async def _rodar_round(
                 if on_item_iniciado is not None:
                     on_item_iniciado(worker_id, item)
                 try:
-                    resultado = await _executar_com_tentativas(page, item, acao, max_tentativas)
+                    resultado = await _executar_com_tentativas(
+                        page, item, acao, max_tentativas, eh_erro_definitivo=eh_erro_definitivo
+                    )
                     resultados.append(resultado)
                     if on_item_concluido is not None:
                         on_item_concluido()
@@ -178,6 +206,7 @@ async def processar_fila(
     on_progresso: Callable[[int, int], None] | None = None,
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> list[ResultadoItem]:
     """Processa `itens` em paralelo usando `num_workers` páginas dentro do
     mesmo `contexto` (já autenticado, criado por quem chama).
@@ -189,6 +218,13 @@ async def processar_fila(
     cada); round 2 processa só quem falhou no round 1 (até `max_tentativas`
     cada de novo). Itens ainda falhando depois disso voltam com
     `sucesso=False` no resultado final — nunca são descartados.
+
+    `eh_erro_definitivo` (opcional, default `None` — sem mudança de
+    comportamento pra quem não passa; achado 2026-08-25, ver
+    `_executar_com_tentativas`): item cujo erro é considerado definitivo
+    (`ResultadoItem.definitivo=True`) NUNCA entra no round 2 — evita
+    reprocessar à toa um resultado de negócio determinístico (ex: Track
+    N'Me recusando um incidente já aberto/já concluído) em volume alto.
 
     `on_progresso(concluidos, total)` (opcional, default `None` — sem
     mudança de comportamento pra quem não passa) é chamado a cada item que
@@ -227,20 +263,20 @@ async def processar_fila(
 
     resultados_r1, sessao_caida, pendentes, cancelado = await _rodar_round(
         contexto, itens, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado,
+        on_item_iniciado, eh_erro_definitivo,
     )
     if sessao_caida is not None:
         raise AguardandoReconexao(pendentes=pendentes, processados=resultados_r1)
     if cancelado:
         raise CancelamentoSolicitado(pendentes=pendentes, processados=resultados_r1)
 
-    falharam = [r.item for r in resultados_r1 if not r.sucesso]
+    falharam = [r.item for r in resultados_r1 if not r.sucesso and not r.definitivo]
     if not falharam:
         return resultados_r1
 
     resultados_r2, sessao_caida2, pendentes2, cancelado2 = await _rodar_round(
         contexto, falharam, acao, num_workers, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado,
+        on_item_iniciado, eh_erro_definitivo,
     )
     if sessao_caida2 is not None:
         raise AguardandoReconexao(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)
@@ -278,6 +314,7 @@ async def _rodar_round_http(
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
     timeout_segundos: float | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> tuple[list[ResultadoItem], SessaoCaidaError | None, list, bool]:
     fila: asyncio.Queue = asyncio.Queue()
     for item in itens:
@@ -301,7 +338,8 @@ async def _rodar_round_http(
                 on_item_iniciado(worker_id, item)
             try:
                 resultado = await _executar_com_tentativas(
-                    request_context, item, acao, max_tentativas, timeout_segundos
+                    request_context, item, acao, max_tentativas, timeout_segundos,
+                    eh_erro_definitivo=eh_erro_definitivo,
                 )
                 resultados.append(resultado)
                 if on_item_concluido is not None:
@@ -334,6 +372,7 @@ async def processar_fila_http(
     cancelar_checker: Callable[[], bool] | None = None,
     on_item_iniciado: Callable[[int, Any], None] | None = None,
     timeout_segundos: float | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> list[ResultadoItem]:
     """Processa `itens` via HTTP puro, sem `Page`/`BrowserContext.
     new_page()` nenhuma -- `concorrencia` tarefas `asyncio` competem por
@@ -350,8 +389,9 @@ async def processar_fila_http(
     resposta redirecionada pra login) — pausa a fila inteira e vira
     `AguardandoReconexao`, nunca gasta tentativas à toa. 2 rounds de retry
     (round 1 fila inteira, round 2 só quem falhou), `on_progresso`/
-    `on_item_iniciado`/`cancelar_checker` com o mesmo significado de
-    `processar_fila` (ver docstring de lá — não repetido aqui).
+    `on_item_iniciado`/`cancelar_checker`/`eh_erro_definitivo` com o mesmo
+    significado de `processar_fila` (ver docstring de lá — não repetido
+    aqui).
 
     `timeout_segundos` (achado 2026-08-20, ver `_executar_com_tentativas`):
     cinto de segurança contra trava indefinida numa requisição individual
@@ -373,20 +413,20 @@ async def processar_fila_http(
 
     resultados_r1, sessao_caida, pendentes, cancelado = await _rodar_round_http(
         request_context, itens, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado, timeout_segundos,
+        on_item_iniciado, timeout_segundos, eh_erro_definitivo,
     )
     if sessao_caida is not None:
         raise AguardandoReconexao(pendentes=pendentes, processados=resultados_r1)
     if cancelado:
         raise CancelamentoSolicitado(pendentes=pendentes, processados=resultados_r1)
 
-    falharam = [r.item for r in resultados_r1 if not r.sucesso]
+    falharam = [r.item for r in resultados_r1 if not r.sucesso and not r.definitivo]
     if not falharam:
         return resultados_r1
 
     resultados_r2, sessao_caida2, pendentes2, cancelado2 = await _rodar_round_http(
         request_context, falharam, acao, concorrencia, max_tentativas, on_item_concluido, cancelar_checker,
-        on_item_iniciado, timeout_segundos,
+        on_item_iniciado, timeout_segundos, eh_erro_definitivo,
     )
     if sessao_caida2 is not None:
         raise AguardandoReconexao(pendentes=pendentes2, processados=resultados_r1 + resultados_r2)

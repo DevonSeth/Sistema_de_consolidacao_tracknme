@@ -87,6 +87,8 @@ CATALOGO: list[EtapaCatalogo] = [
         saidas={
             "consolidacao": None, "fila_operacional": "fila_operacional",
             "divergencias_instalacao": "divergencias_instalacao",
+            "divergencias_remocao": "divergencias_remocao",
+            "divergencias_manutencao": "divergencias_manutencao",
         },
     ),
     EtapaCatalogo(
@@ -97,7 +99,10 @@ CATALOGO: list[EtapaCatalogo] = [
     EtapaCatalogo(
         "publicar_fila_operacional", "E", "Publicar fila operacional",
         "etapa_publicar_fila_operacional",
-        entradas={"fila_operacional": "fila_operacional", "divergencias_instalacao": "divergencias_instalacao"},
+        entradas={
+            "fila_operacional": "fila_operacional", "divergencias_instalacao": "divergencias_instalacao",
+            "divergencias_remocao": "divergencias_remocao", "divergencias_manutencao": "divergencias_manutencao",
+        },
     ),
     EtapaCatalogo(
         "sincronizar_atendente_tratativas", "F", "Sincronizar seleção do atendente",
@@ -318,7 +323,19 @@ async def executar_etapas_com_contexto(
         funcao = getattr(pipeline, etapa.nome_funcao)
         kwargs = _kwargs_com_progresso(etapa, contexto, on_progresso_item, cancelar_checker, on_worker_status)
         iniciado_em = datetime.now(timezone.utc)
-        resultado = await funcao(**kwargs) if etapa.async_ else funcao(**kwargs)
+        try:
+            resultado = await funcao(**kwargs) if etapa.async_ else funcao(**kwargs)
+        except Exception as e:  # noqa: BLE001 - achado 2026-08-25: uma exceção não tratada aqui (ex:
+            # `etapa_enriquecimento_sga` tem código de preparação sem try/except próprio, antes de
+            # entrar no navegador) escapava até `ui.app._rodar_cadeia`, sem nunca chegar em
+            # `_registrar_execucao_segura` nem em `executar_cadeia` (que só libera a trava no caminho
+            # feliz, ver lá) -- trava ficava presa pra sempre, sem log nenhum, e o botão "Cancelar"
+            # ficava desabilitado (a UI já achava que não estava mais rodando). Cada etapa individual
+            # já devolve ResultadoEtapa(sucesso=False) pros erros que ela mesma sabe tratar -- isso
+            # aqui é só o cinto de segurança pro que sobra.
+            resultado = pipeline.ResultadoEtapa(
+                etapa.id, sucesso=False, mensagem=f"Exceção não tratada em {etapa.id}: {type(e).__name__}: {e}"
+            )
         _registrar_execucao_segura(execucao_id, etapa.id, iniciado_em, datetime.now(timezone.utc), resultado)
 
         execucao.resultados.append(resultado)
@@ -369,10 +386,18 @@ async def executar_cadeia(
     if not supabase_client.adquirir_execucao_lock(socket.gethostname()):
         return ExecucaoCadeia(motivo_parada="travado", execucao_id=execucao_id)
 
-    execucao = await executar_etapas_com_contexto(
-        etapas, contexto, cancelar_checker, on_progresso, on_progresso_item, on_resultado,
-        execucao_id=execucao_id, on_worker_status=on_worker_status,
-    )
+    try:
+        execucao = await executar_etapas_com_contexto(
+            etapas, contexto, cancelar_checker, on_progresso, on_progresso_item, on_resultado,
+            execucao_id=execucao_id, on_worker_status=on_worker_status,
+        )
+    except Exception:  # noqa: BLE001 - achado 2026-08-25: defesa em profundidade -- `executar_etapas_
+        # com_contexto` já não deveria deixar nada escapar (ver o try/except de lá), mas se algo
+        # inesperado ainda assim escapar (ex: erro dentro do próprio loop, fora da chamada da etapa),
+        # a trava não pode ficar presa pra sempre sem liberar. Repropaga depois de liberar -- quem
+        # chamou ainda precisa saber que algo quebrou de verdade.
+        supabase_client.liberar_execucao_lock()
+        raise
     if execucao.motivo_parada != "aguardando_reconexao":
         supabase_client.liberar_execucao_lock()
     return execucao
@@ -417,9 +442,15 @@ async def retomar_etapa(
 
     if etapa.id == "enriquecimento_sga":
         alvos = resultado_travado.dados.get("alvos_consulta_sga", {})
-        novo = await pipeline.etapa_enriquecimento_sga(
-            chassis_override=pendentes, alvos_override=alvos, **kwargs
-        )
+        try:
+            novo = await pipeline.etapa_enriquecimento_sga(
+                chassis_override=pendentes, alvos_override=alvos, **kwargs
+            )
+        except Exception as e:  # noqa: BLE001 - mesmo cinto de segurança de `executar_etapas_com_contexto`
+            novo = pipeline.ResultadoEtapa(
+                etapa.id, sucesso=False, mensagem=f"Exceção não tratada em {etapa.id}: {type(e).__name__}: {e}",
+                dados={"situacoes_sga": {}, "falhas": []},
+            )
         fundido = {**resultado_travado.dados["situacoes_sga"], **novo.dados["situacoes_sga"]}
         falhas_fundidas = resultado_travado.dados.get("falhas", []) + novo.dados.get("falhas", [])
         resultado_final = pipeline.ResultadoEtapa(
@@ -436,7 +467,13 @@ async def retomar_etapa(
         else:
             chave_sucesso, chave_grupo, funcao = "concluidos", "grupo_2_concluir", pipeline.etapa_fechar_incidentes_automaticos
 
-        novo = await funcao(dados={chave_grupo: pendentes}, **kwargs)
+        try:
+            novo = await funcao(dados={chave_grupo: pendentes}, **kwargs)
+        except Exception as e:  # noqa: BLE001 - mesmo cinto de segurança de `executar_etapas_com_contexto`
+            novo = pipeline.ResultadoEtapa(
+                etapa.id, sucesso=False, mensagem=f"Exceção não tratada em {etapa.id}: {type(e).__name__}: {e}",
+                dados={chave_sucesso: [], "falhas": []},
+            )
         sucesso_fundido = resultado_travado.dados[chave_sucesso] + novo.dados[chave_sucesso]
         falhas_fundidas = resultado_travado.dados["falhas"] + novo.dados["falhas"]
         resultado_final = pipeline.ResultadoEtapa(

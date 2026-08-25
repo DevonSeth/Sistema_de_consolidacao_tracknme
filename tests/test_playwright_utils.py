@@ -77,6 +77,52 @@ async def test_item_falha_round1_mas_sucede_no_round2():
 
 
 @pytest.mark.asyncio
+async def test_erro_definitivo_nao_entra_no_round2():
+    """2026-08-25 — erro de negócio determinístico (ex: Track N' Me
+    recusando incidente já aberto) não deve gastar as tentativas
+    restantes nem ser reprocessado no round 2."""
+    chamadas = {}
+
+    async def acao(page, item):
+        chamadas[item] = chamadas.get(item, 0) + 1
+        raise RuntimeError("já aberto")
+
+    resultados = await processar_fila(
+        ContextoFalso(), ["a"], acao, num_workers=1, max_tentativas=3,
+        eh_erro_definitivo=lambda e: "já aberto" in str(e),
+    )
+
+    assert len(resultados) == 1
+    assert resultados[0].sucesso is False
+    assert resultados[0].definitivo is True
+    assert resultados[0].tentativas == 1
+    assert chamadas["a"] == 1  # nunca tentou de novo (nem dentro do round 1, nem no round 2)
+
+
+@pytest.mark.asyncio
+async def test_erro_nao_definitivo_continua_indo_pro_round2():
+    """Confirma que `eh_erro_definitivo` não afeta falha técnica comum —
+    sem regressão no comportamento de round 2 já existente."""
+    tentativas_totais = {}
+
+    async def acao(page, item):
+        tentativas_totais[item] = tentativas_totais.get(item, 0) + 1
+        if tentativas_totais[item] < 4:
+            raise RuntimeError("falha técnica")
+        return "recuperado"
+
+    resultados = await processar_fila(
+        ContextoFalso(), ["a"], acao, num_workers=1, max_tentativas=3,
+        eh_erro_definitivo=lambda e: "já aberto" in str(e),
+    )
+
+    assert len(resultados) == 1
+    assert resultados[0].sucesso is True
+    assert resultados[0].resultado == "recuperado"
+    assert tentativas_totais["a"] == 4  # 3 tentativas do round 1 + 1 do round 2
+
+
+@pytest.mark.asyncio
 async def test_item_falha_nas_duas_rodadas_fica_marcado_como_falho():
     async def acao(page, item):
         raise RuntimeError("sempre falha")
@@ -346,6 +392,26 @@ async def test_http_item_falha_round1_mas_sucede_no_round2():
 
 
 @pytest.mark.asyncio
+async def test_http_erro_definitivo_nao_entra_no_round2():
+    chamadas = {}
+
+    async def acao(request_context, item):
+        chamadas[item] = chamadas.get(item, 0) + 1
+        raise RuntimeError("já aberto")
+
+    resultados = await processar_fila_http(
+        object(), ["a"], acao, concorrencia=1, max_tentativas=3,
+        eh_erro_definitivo=lambda e: "já aberto" in str(e),
+    )
+
+    assert len(resultados) == 1
+    assert resultados[0].sucesso is False
+    assert resultados[0].definitivo is True
+    assert resultados[0].tentativas == 1
+    assert chamadas["a"] == 1
+
+
+@pytest.mark.asyncio
 async def test_http_item_falha_nas_duas_rodadas_fica_marcado_como_falho():
     async def acao(request_context, item):
         raise RuntimeError("sempre falha")
@@ -519,6 +585,36 @@ async def test_executar_com_tentativas_timeout_none_preserva_comportamento_atual
 
     assert resultado.sucesso is True
     assert resultado.resultado == "ok"
+
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_erro_definitivo_para_na_primeira_tentativa():
+    chamadas = {"n": 0}
+
+    async def acao(page, item):
+        chamadas["n"] += 1
+        raise RuntimeError("já aberto")
+
+    resultado = await pu._executar_com_tentativas(
+        object(), "x", acao, max_tentativas=3, eh_erro_definitivo=lambda e: "já aberto" in str(e),
+    )
+
+    assert resultado.sucesso is False
+    assert resultado.definitivo is True
+    assert resultado.tentativas == 1
+    assert chamadas["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_executar_com_tentativas_eh_erro_definitivo_none_preserva_comportamento():
+    async def acao(page, item):
+        raise RuntimeError("falha técnica")
+
+    resultado = await pu._executar_com_tentativas(object(), "x", acao, max_tentativas=2)
+
+    assert resultado.sucesso is False
+    assert resultado.definitivo is False
+    assert resultado.tentativas == 2
 
 
 @pytest.mark.asyncio

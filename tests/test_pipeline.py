@@ -8,6 +8,16 @@ from core.dedup import gerar_chave_unica
 from orchestrator import pipeline as orch
 
 
+@pytest.fixture(autouse=True)
+def _sem_diagnostico_circuit_breaker_real(monkeypatch, tmp_path):
+    """`_diretorio_logs` aponta pra uma pasta temporária por padrão
+    (2026-08-25, mesmo princípio de `test_catalogo_etapas._sem_log_
+    execucoes_real`) — sem isso, todo teste que passa por `_avaliar_
+    circuit_breaker_sga_http` escreveria em `logs/diagnostico_circuit_
+    breaker_sga_http.jsonl` de verdade, na pasta do projeto."""
+    monkeypatch.setattr(orch, "_diretorio_logs", lambda: tmp_path)
+
+
 # --- etapa_baixar_relatorios ------------------------------------------------
 
 @pytest.mark.asyncio
@@ -393,7 +403,7 @@ def _preparar_mocks_playwright(monkeypatch):
 async def test_processar_fila_com_navegador_propaga_aguardando_reconexao(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_reconexao(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
+    async def _processar_fila_levanta_reconexao(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None, eh_erro_definitivo=None):
         raise orch.playwright_utils.AguardandoReconexao(
             pendentes=["item-pendente"],
             processados=[
@@ -420,7 +430,7 @@ async def test_processar_fila_com_navegador_propaga_aguardando_reconexao(monkeyp
 async def test_processar_fila_com_navegador_propaga_cancelamento(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None, eh_erro_definitivo=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=["item-pendente"],
             processados=[
@@ -606,7 +616,7 @@ async def test_etapa_abrir_incidentes_automaticos_sessao_caida_preserva_sucesso_
 async def test_etapa_abrir_incidentes_automaticos_cancelado_preserva_sucesso_anterior(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None, eh_erro_definitivo=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=[{"placa": "PENDENTE"}],
             processados=[
@@ -690,7 +700,7 @@ async def test_etapa_fechar_incidentes_automaticos_sessao_caida_preserva_sucesso
 async def test_etapa_fechar_incidentes_automaticos_cancelado_preserva_sucesso_anterior(monkeypatch):
     contexto, browser = _preparar_mocks_playwright(monkeypatch)
 
-    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None):
+    async def _processar_fila_levanta_cancelamento(contexto_arg, itens, acao, on_progresso=None, cancelar_checker=None, on_item_iniciado=None, eh_erro_definitivo=None):
         raise orch.playwright_utils.CancelamentoSolicitado(
             pendentes=[{"placa": "PENDENTE"}],
             processados=[
@@ -866,6 +876,7 @@ async def test_etapa_abrir_incidentes_automaticos_repassa_timeout_configurado(mo
     async def _processar_fila_http_fake(
         contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
         on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+        eh_erro_definitivo=None,
     ):
         timeouts_recebidos.append(timeout_segundos)
         return []
@@ -892,6 +903,7 @@ async def test_etapa_abrir_incidentes_automaticos_timeout_usa_default_quando_par
     async def _processar_fila_http_fake(
         contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
         on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+        eh_erro_definitivo=None,
     ):
         timeouts_recebidos.append(timeout_segundos)
         return []
@@ -983,6 +995,38 @@ async def test_etapa_abrir_incidentes_automaticos_duplicado_nao_dispara_circuit_
 
 
 @pytest.mark.asyncio
+async def test_etapa_abrir_incidentes_automaticos_duplicado_nao_reprocessa(monkeypatch):
+    """2026-08-25 — revisão da decisão de 2026-08-06: duplicado não deve
+    gastar retry (nem as tentativas restantes do round 1, nem o round 2)
+    -- só 1 chamada real por item, mesmo com `max_tentativas`/2 rounds."""
+    contexto, browser = _preparar_mocks_playwright(monkeypatch)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_parametros",
+        lambda: {"tracknme_http_habilitado": True, "tracknme_http_limiar_falha_tecnica": 0.05},
+    )
+    monkeypatch.setattr(orch.tracknme_bot, "preparar_contexto_http", _preparar_contexto_http_falso)
+
+    chamadas = {}
+
+    async def _abrir_incidente_http_duplicado(contexto_http, placa, cliente):
+        chamadas[placa] = chamadas.get(placa, 0) + 1
+        raise orch.tracknme_bot.IncidenteDuplicadoError(f"incidente já aberto (placa={placa})")
+
+    monkeypatch.setattr(orch.tracknme_bot, "abrir_incidente_http", _abrir_incidente_http_duplicado)
+
+    grupo_1_dez_itens = [
+        {"placa": f"DUP{i}", "chassi": f"X{i}", "imei": str(i), "cliente": "Fulano"} for i in range(10)
+    ]
+    dados = {**_DADOS_GRUPOS_FAKE, "grupo_1_abrir": grupo_1_dez_itens}
+
+    resultado = await orch.etapa_abrir_incidentes_automaticos(dados)
+
+    assert resultado.sucesso is True
+    assert len(resultado.dados["falhas"]) == 10
+    assert all(n == 1 for n in chamadas.values())  # nunca tentou de novo nenhum item
+
+
+@pytest.mark.asyncio
 async def test_etapa_abrir_incidentes_automaticos_reconexao_no_estagio_http_inclui_resto_pendente(monkeypatch):
     # Achado 2026-08-19 (mesmo espírito do teste equivalente do SGA): se o
     # Estágio HTTP cair durante o canário, o "resto" (que nunca chegou a
@@ -998,6 +1042,7 @@ async def test_etapa_abrir_incidentes_automaticos_reconexao_no_estagio_http_incl
     async def _processar_fila_http_levanta_reconexao(
         contexto_http, itens, acao, concorrencia=10, max_tentativas=3,
         on_progresso=None, cancelar_checker=None, on_item_iniciado=None, timeout_segundos=None,
+        eh_erro_definitivo=None,
     ):
         raise orch.playwright_utils.AguardandoReconexao(pendentes=list(itens), processados=[])
 
@@ -1471,8 +1516,9 @@ async def test_etapa_enriquecimento_sga_checkpoint_pula_quem_foi_atualizado_rece
     monkeypatch.setattr(
         orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote",
         lambda chassis: {
-            "X1": {"chassi": "X1", "status": "ATIVO", "desde": "2026-08-01T00:00:00+00:00",
-                    "atualizado_em": agora.isoformat(), "encontrado_via": "chassi"},
+            "X1": {"chassi": "X1", "status": "ATIVO",
+                    "desde": datetime.fromisoformat("2026-08-01T00:00:00+00:00"),
+                    "atualizado_em": agora, "encontrado_via": "chassi"},
         },
     )
     chamadas = []
@@ -1500,8 +1546,10 @@ async def test_etapa_enriquecimento_sga_checkpoint_nao_pula_quem_esta_desatualiz
     monkeypatch.setattr(
         orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote",
         lambda chassis: {
-            "X1": {"chassi": "X1", "status": "ATIVO", "desde": "2020-01-01T00:00:00+00:00",
-                    "atualizado_em": "2020-01-01T00:00:00+00:00", "encontrado_via": "chassi"},
+            "X1": {"chassi": "X1", "status": "ATIVO",
+                    "desde": datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+                    "atualizado_em": datetime.fromisoformat("2020-01-01T00:00:00+00:00"),
+                    "encontrado_via": "chassi"},
         },
     )
     chamadas = []
@@ -1538,6 +1586,28 @@ async def test_etapa_enriquecimento_sga_checkpoint_com_erro_de_leitura_nao_pula_
 
     assert resultado.sucesso is True
     assert sorted(chamadas) == ["X1", "X2"]
+
+
+def test_situacoes_veiculo_sga_recentes_usa_atualizado_em_como_datetime_direto(monkeypatch):
+    """Achado real 2026-08-25 (bug que chegou a travar a Fase D em
+    produção): `supabase_client.buscar_situacoes_veiculo_sga_em_lote`
+    (função real, achado no mesmo dia) passou a devolver `atualizado_em`
+    já convertido pra `datetime` (antes vinha string ISO crua do
+    Postgres). `_situacoes_veiculo_sga_recentes` tentava fazer
+    `datetime.fromisoformat` em cima de novo -- `TypeError: fromisoformat:
+    argument must be str`, escapando como exceção não tratada (só ficou
+    visível depois do fix de robustez em `catalogo_etapas.py` no mesmo
+    dia). Este teste chama a função com um `datetime` de verdade (não
+    string), do jeito que a função real hoje devolve."""
+    agora = datetime.now(orch.timezone.utc)
+    monkeypatch.setattr(
+        orch.supabase_client, "buscar_situacoes_veiculo_sga_em_lote",
+        lambda chaves: {"X1": {"status": "ATIVO", "atualizado_em": agora}},
+    )
+
+    recentes = orch._situacoes_veiculo_sga_recentes(["X1"], {}, agora)
+
+    assert "X1" in recentes
 
 
 @pytest.mark.asyncio
@@ -1848,6 +1918,7 @@ async def test_etapa_consolidar_com_sga_sucesso_com_tudo_explicito(monkeypatch):
     assert _TRATATIVA_IR_FAKE in fila
     assert resultado.dados["divergencias_instalacao"] == []
     assert resultado.dados["divergencias_remocao"] == []
+    assert resultado.dados["divergencias_manutencao"] == []
 
 
 @pytest.mark.asyncio
@@ -2052,8 +2123,8 @@ def _preparar_mocks_publicar(
 
     syncs = []
 
-    def _sincronizar_fake(chave_unica, campos):
-        syncs.append((chave_unica, campos))
+    def _sincronizar_em_lote_fake(atualizacoes):
+        syncs.extend(atualizacoes.items())
 
     chamadas_estado_disparo = []
 
@@ -2065,7 +2136,7 @@ def _preparar_mocks_publicar(
     monkeypatch.setattr(orch.google_sheets_client, "ler_aba", _ler_aba_fake)
     monkeypatch.setattr(orch.google_sheets_client, "reescrever_aba", _reescrever_aba_fake)
     monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", _upsert_tratativas_em_lote_fake)
-    monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", _sincronizar_fake)
+    monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente_em_lote", _sincronizar_em_lote_fake)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", _buscar_estado_disparo_fake)
     monkeypatch.setattr(
         orch.supabase_client, "buscar_tratativas_abertas_no_motor", lambda: tratativas_abertas_no_motor
@@ -2305,7 +2376,7 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_instal
     resultado = await orch.etapa_publicar_fila_operacional([], divergencias_instalacao=[divergencia])
 
     assert resultado.sucesso is True
-    assert len(reescritas) == 3
+    assert len(reescritas) == 4
     _, aba, linhas_escritas = reescritas[1]
     assert aba == "Análise de Divergência - Instalação"
     assert len(linhas_escritas) == 1
@@ -2326,6 +2397,9 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_instal
     _, aba_remocao, linhas_remocao = reescritas[2]
     assert aba_remocao == "Análise de Divergência - Remoção"
     assert linhas_remocao == []
+    _, aba_manutencao, linhas_manutencao = reescritas[3]
+    assert aba_manutencao == "Análise de Divergência - Manutenção"
+    assert linhas_manutencao == []
 
 
 @pytest.mark.asyncio
@@ -2336,7 +2410,7 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_remoca
     resultado = await orch.etapa_publicar_fila_operacional([], divergencias_remocao=[divergencia])
 
     assert resultado.sucesso is True
-    assert len(reescritas) == 3
+    assert len(reescritas) == 4
     _, aba, linhas_escritas = reescritas[2]
     assert aba == "Análise de Divergência - Remoção"
     assert len(linhas_escritas) == 1
@@ -2352,6 +2426,44 @@ async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_remoca
     assert escrita["Ação"] == divergencia["acao"]
     assert escrita["ID (hash)"] == gerar_chave_unica("remocao", {
         "cpf": "12345678900", "chassi": "CHASSI-SGA-ATIVO", "situacao": "Ativo", "data_contrato": "15/03/2026",
+    })
+
+
+def _linha_divergencia_manutencao(**extra):
+    """2026-08-25 — item de `divergencias_manutencao`, mesmo espírito de
+    `_linha_divergencia_remocao`."""
+    base = {
+        "chassi": "CHASSI-SGA-INATIVO", "placa": "XYZ9A87", "cliente": "Fulano de Tal",
+        "evento": "Sem comunicação", "status_sga": "INATIVO",
+        "observacao": "Status SGA INATIVO, mas o equipamento segue comunicando",
+        "acao": "Cancelar contrato manualmente",
+    }
+    base.update(extra)
+    return base
+
+
+@pytest.mark.asyncio
+async def test_etapa_publicar_fila_operacional_escreve_aba_de_divergencia_manutencao(monkeypatch):
+    divergencia = _linha_divergencia_manutencao()
+    reescritas, _upserts, _syncs, _chamadas = _preparar_mocks_publicar(monkeypatch, [])
+
+    resultado = await orch.etapa_publicar_fila_operacional([], divergencias_manutencao=[divergencia])
+
+    assert resultado.sucesso is True
+    assert len(reescritas) == 4
+    _, aba, linhas_escritas = reescritas[3]
+    assert aba == "Análise de Divergência - Manutenção"
+    assert len(linhas_escritas) == 1
+    escrita = linhas_escritas[0]
+    assert escrita["Chassi"] == "CHASSI-SGA-INATIVO"
+    assert escrita["Placa"] == "XYZ9A87"
+    assert escrita["Cliente"] == "Fulano de Tal"
+    assert escrita["Evento"] == "Sem comunicação"
+    assert escrita["Status SGA"] == "INATIVO"
+    assert escrita["Observação"] == divergencia["observacao"]
+    assert escrita["Ação"] == divergencia["acao"]
+    assert escrita["ID (hash)"] == gerar_chave_unica("manutencao", {
+        "placa": "XYZ9A87", "evento": "Sem comunicação",
     })
 
 
@@ -2427,7 +2539,7 @@ async def test_etapa_publicar_fila_operacional_falha_ao_reescrever_aba(monkeypat
     monkeypatch.setattr(orch.google_sheets_client, "ler_aba", lambda planilha, aba: [])
     monkeypatch.setattr(orch.google_sheets_client, "reescrever_aba", _reescrever_aba_falha)
     monkeypatch.setattr(orch.supabase_client, "upsert_tratativas_em_lote", lambda lista_dados: None)
-    monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente", lambda chave, campos: None)
+    monkeypatch.setattr(orch.supabase_client, "sincronizar_campos_atendente_em_lote", lambda atualizacoes: None)
     monkeypatch.setattr(orch.supabase_client, "buscar_estado_disparo_por_chaves", lambda chaves: {})
     monkeypatch.setattr(orch.supabase_client, "buscar_tratativas_abertas_no_motor", lambda: [])
     monkeypatch.setattr(orch.supabase_client, "buscar_bases_ativas", lambda: [])
@@ -2773,22 +2885,24 @@ def test_etapa_sincronizar_atendente_tratativas_sucesso(monkeypatch):
     })]
 
 
-def test_sincronizar_atendente_da_aba_espaca_chamadas_sequenciais(monkeypatch):
-    """Achado 2026-08-21: `sincronizar_campos_atendente` roda 1x por linha
-    da aba, sem lote -- com filas grandes isso é uma rajada de chamadas
-    sequenciais que pode disparar a proteção anti-bot do Cloudflare no
-    gateway da Supabase. Espaçar as chamadas reduz esse sinal."""
+def test_sincronizar_atendente_da_aba_acumula_e_chama_o_lote_1_vez_so(monkeypatch):
+    """Achado 2026-08-25: a versão anterior chamava `sincronizar_campos_
+    atendente` 1x por linha da aba (com sleep entre cada), o que levava
+    ~10-11min no volume real (~1.900 linhas). Agora acumula tudo num dict
+    e chama `sincronizar_campos_atendente_em_lote` 1 única vez -- quem
+    chunkeia/espaça as chamadas de rede é essa função, não o loop daqui."""
     sheet_atual = [_linha_atendente_sheet("chave-1"), _linha_atendente_sheet("chave-2"), _linha_atendente_sheet("chave-3")]
-    chamadas_sleep = []
-    monkeypatch.setattr(orch, "sleep", lambda segundos: chamadas_sleep.append(segundos))
-    _, _, syncs, _ = _preparar_mocks_publicar(monkeypatch, sheet_atual)
-    monkeypatch.setattr(orch, "sleep", lambda segundos: chamadas_sleep.append(segundos))  # sobrescreve o no-op do fixture
+    chamadas_lote = []
+    _, _, _syncs, _ = _preparar_mocks_publicar(monkeypatch, sheet_atual)
+    monkeypatch.setattr(
+        orch.supabase_client, "sincronizar_campos_atendente_em_lote",
+        lambda atualizacoes: chamadas_lote.append(atualizacoes),
+    )
 
     orch._sincronizar_atendente_da_aba(datetime(2026, 8, 21, 9, 0, 0))
 
-    assert len(syncs) == 3
-    assert len(chamadas_sleep) == 3
-    assert all(s == orch.ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS for s in chamadas_sleep)
+    assert len(chamadas_lote) == 1
+    assert set(chamadas_lote[0]) == {"chave-1", "chave-2", "chave-3"}
 
 
 def test_etapa_sincronizar_atendente_tratativas_falha_ao_ler_aba(monkeypatch):

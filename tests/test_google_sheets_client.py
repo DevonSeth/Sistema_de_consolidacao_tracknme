@@ -230,7 +230,7 @@ def test_configurar_checkbox_finalizado_pendente_ligacao(monkeypatch):
 
     letra = sheets._coluna_letra(sheets.CABECALHO_PENDENTE_LIGACAO.index("Finalizado") + 1)
     limite = sheets._LINHA_LIMITE_VALIDACAO
-    assert fake.validacoes == [(f"{letra}2:{letra}{limite}", sheets.ValidationConditionType.boolean, [], True, False)]
+    assert fake.validacoes == [(f"{letra}2:{letra}{limite}", sheets.ValidationConditionType.boolean, [], True, True)]
     assert fake.resizes == [limite]
 
 
@@ -264,7 +264,7 @@ def test_runs_por_cor_sem_nenhuma_coluna_de_equipe_devolve_1_run():
     assert sheets._runs_por_cor(["A", "B", "C"], set()) == [(0, 3, False)]
 
 
-def test_configurar_formatacao_cabecalho_aplica_nas_6_abas(monkeypatch):
+def test_configurar_formatacao_cabecalho_aplica_nas_7_abas(monkeypatch):
     fakes = {aba: WorksheetComFormato() for aba in sheets._ABAS_CABECALHO_FORMATADO}
     monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fakes[aba])
 
@@ -273,6 +273,7 @@ def test_configurar_formatacao_cabecalho_aplica_nas_6_abas(monkeypatch):
     assert set(fakes) == {
         "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma",
         "Alertas", "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
+        "Análise de Divergência - Manutenção",
     }
     # Tratativas: interseção mais complexa (equipe intercalada com sistema)
     # conferida coluna a coluna, não só via `_runs_por_cor` (evita teste
@@ -350,13 +351,64 @@ def test_configurar_checkboxes_tratativas_aplica_nas_4_colunas(monkeypatch):
             sheets.ValidationConditionType.boolean,
             [],
             True,
-            False,
+            True,
         )
         for coluna in sheets._COLUNAS_CHECKBOX_TRATATIVAS
     ]
     assert fake.validacoes == esperado
     # 1 resize só, não 1 por coluna (row_count já fica >= limite depois do 1º)
     assert fake.resizes == [limite]
+
+
+# --------------------------------------------------------------------------
+# reescrever_aba reaplica checkbox (achado 2026-08-25: some depois de todo
+# clear()+update() real em Tratativas/Pendente de Ligação, causa exata do
+# lado da API não confirmada -- correção é tornar a escrita auto-curativa)
+# --------------------------------------------------------------------------
+
+def test_reescrever_aba_tratativas_reaplica_checkboxes(monkeypatch):
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.reescrever_aba(sheets.NOME_PLANILHA_OPERACIONAL, "Tratativas", [])
+
+    assert fake.limpou is True
+    limite = sheets._LINHA_LIMITE_VALIDACAO
+    esperado = [
+        (
+            f"{sheets._coluna_letra(sheets.CABECALHO_TRATATIVAS.index(coluna) + 1)}2:"
+            f"{sheets._coluna_letra(sheets.CABECALHO_TRATATIVAS.index(coluna) + 1)}{limite}",
+            sheets.ValidationConditionType.boolean,
+            [],
+            True,
+            True,
+        )
+        for coluna in sheets._COLUNAS_CHECKBOX_TRATATIVAS
+    ]
+    assert fake.validacoes == esperado
+
+
+def test_reescrever_aba_pendente_ligacao_reaplica_checkbox_finalizado(monkeypatch):
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.reescrever_aba(sheets.NOME_PLANILHA_OPERACIONAL, "Pendente de Ligação", [])
+
+    letra = sheets._coluna_letra(sheets.CABECALHO_PENDENTE_LIGACAO.index("Finalizado") + 1)
+    limite = sheets._LINHA_LIMITE_VALIDACAO
+    assert fake.validacoes == [(f"{letra}2:{letra}{limite}", sheets.ValidationConditionType.boolean, [], True, True)]
+
+
+def test_reescrever_aba_sem_checkbox_nao_reaplica_nada(monkeypatch):
+    """Abas sem coluna BOOLEAN (ex: Alertas, Análise de Divergência) não
+    pagam o custo de chamadas de rede extras que não fariam sentido nelas."""
+    fake = WorksheetComValidacao()
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: fake)
+
+    sheets.reescrever_aba(sheets.NOME_PLANILHA_OPERACIONAL, "Alertas", [])
+
+    assert fake.limpou is True
+    assert fake.validacoes == []
 
 
 class WorksheetFormatacao:
@@ -535,6 +587,7 @@ def test_formatar_colunas_identificador_texto_operacional_so_abas_com_telefone(m
     assert set(ws_oper) == {
         "Tratativas", "Pendente de Ligação", "Encaminhar pra Puma", "Alertas",
         "Análise de Divergência - Instalação", "Análise de Divergência - Remoção",
+        "Análise de Divergência - Manutenção",
     }
     for aba, cabecalho in sheets._CABECALHOS_OPERACIONAL.items():
         ws = ws_oper[aba]

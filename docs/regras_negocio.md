@@ -110,6 +110,15 @@ classificação da cascata acima, mesmo uma já resolvida automaticamente
 | `REGRA_SGA_INATIVO` | **1** | SGA retornou qualquer status diferente de `ATIVO` | Fecha o incidente automaticamente | Sistema |
 | `REGRA_SGA_NAO_ENCONTRADO` | **2** | SGA não encontrou o chassi cadastrado | Verificar cadastro do veículo/associado | Humano |
 
+**2026-08-25**: `REGRA_SGA_INATIVO` passou a também alimentar a aba
+"Análise de Divergência - Manutenção" (código `REGRA_MANUTENCAO_
+DIVERGENCIA_SGA`, só identifica a linha de divergência — não muda o
+fechamento automático em si). Motivação: se o SGA diz que o associado
+não está mais ativo mas o equipamento segue comunicando, ele
+"teoricamente deveria estar fora da lista de Rastreadores Ativos" — dá
+visibilidade de equipamento que devia ter sido removido fisicamente e
+não foi. `REGRA_SGA_NAO_ENCONTRADO` não entra nessa regra nova.
+
 **Porquê** (ensinado pelo usuário): só veículo ativo na cooperativa
 precisa de tratamento de manutenção — se ele reativar e voltar a
 precisar de contato, o sistema recaptura isso sozinho nos critérios que
@@ -118,13 +127,18 @@ já existem (o SGA é consultado de novo a cada execução, nunca fica
 erro de cadastro, não ausência real do veículo — por isso vira tratativa
 humana em vez de fechamento automático.
 
-Textos finais (mesmo padrão enxuto das demais regras) — **já rodados e
-confirmados em produção** (2026-08-07, ver SQL em `_handoff/HANDOFF.md`):
+Textos finais (mesmo padrão enxuto das demais regras) — as 2 primeiras
+linhas **já rodadas e confirmadas em produção** (2026-08-07, ver SQL em
+`_handoff/HANDOFF.md`); a 3ª (`REGRA_MANUTENCAO_DIVERGENCIA_SGA`,
+2026-08-25) tem código+testes prontos, mas **ainda não foi inserida em
+`rule_templates`** nem a worksheet real foi criada — ação separada, com
+aprovação explícita:
 
 | codigo_regra | observação (`template_observacao`) | ação (`template_acao`) |
 |---|---|---|
 | `REGRA_SGA_INATIVO` | SGA retornou '{status_sga}' — associado não está mais ativo. | Nenhuma ação necessária — encerrado por status do SGA. |
 | `REGRA_SGA_NAO_ENCONTRADO` | SGA não encontrou esse chassi. | Verificar cadastro do veículo/associado. |
+| `REGRA_MANUTENCAO_DIVERGENCIA_SGA` | Status SGA {status_sga}, mas o equipamento segue comunicando | Cancelar contrato manualmente |
 
 ## Regra nova avaliada e rejeitada
 

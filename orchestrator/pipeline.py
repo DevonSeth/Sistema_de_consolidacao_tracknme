@@ -59,6 +59,7 @@ com o usuário que isso não acontece em produção, só antes da aprovação
 completa).
 """
 
+import json
 import sys
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -150,6 +151,18 @@ def _diretorio_downloads() -> Path:
     else:
         base = Path(__file__).resolve().parent.parent
     return base / "downloads"
+
+
+def _diretorio_logs() -> Path:
+    """Mesma convenção de `_diretorio_downloads` (e de
+    `orchestrator.catalogo_etapas._diretorio_logs`, duplicada aqui de
+    propósito pra não criar import circular — `catalogo_etapas` já
+    importa `pipeline`)."""
+    if getattr(sys, "frozen", False):
+        base = manager._diretorio_dados_local()
+    else:
+        base = Path(__file__).resolve().parent.parent
+    return base / "logs"
 
 
 def _caminhos_padrao() -> dict:
@@ -283,6 +296,7 @@ async def _processar_fila_com_navegador(
     cancelar_checker: Callable[[], bool] | None = None,
     descrever_item: Callable[[Any], str] | None = None,
     on_worker_status: Callable[[int, str], None] | None = None,
+    eh_erro_definitivo: Callable[[Exception], bool] | None = None,
 ) -> tuple[
     list, str | None, "playwright_utils.AguardandoReconexao | None", "playwright_utils.CancelamentoSolicitado | None"
 ]:
@@ -320,7 +334,7 @@ async def _processar_fila_com_navegador(
             try:
                 resultados = await playwright_utils.processar_fila(
                     context, itens, acao, on_progresso=on_progresso, cancelar_checker=cancelar_checker,
-                    on_item_iniciado=on_item_iniciado,
+                    on_item_iniciado=on_item_iniciado, eh_erro_definitivo=eh_erro_definitivo,
                 )
             finally:
                 await context.close()
@@ -365,7 +379,7 @@ async def _acao_concluir_http(contexto_http: "tracknme_bot.ContextoHttp", linha:
     return {"linha": linha, "resultado": resultado}
 
 
-def _avaliar_circuit_breaker_tracknme_http(resultados_canario: list, parametros: dict) -> dict | None:
+def _avaliar_circuit_breaker_tracknme_http(resultados_canario: list, parametros: dict, etapa: str = "") -> dict | None:
     """Mesmo espírito do circuit breaker do SGA (`_avaliar_circuit_
     breaker_sga_http`), mas só com a perna de falha técnica — "veículo
     não encontrado" aqui já é tratado como falha de item normal
@@ -388,9 +402,25 @@ def _avaliar_circuit_breaker_tracknme_http(resultados_canario: list, parametros:
         1 for r in resultados_canario
         if not r.sucesso and not tracknme_bot.eh_erro_de_negocio_esperado(r.erro)
     )
+    erro_negocio_esperado = sum(
+        1 for r in resultados_canario
+        if not r.sucesso and tracknme_bot.eh_erro_de_negocio_esperado(r.erro)
+    )
     taxa_falha_tecnica = falha_tecnica / total
     limiar_falha_tecnica = float(parametros.get("tracknme_http_limiar_falha_tecnica", 0.05))
-    if taxa_falha_tecnica > limiar_falha_tecnica:
+    abortado = taxa_falha_tecnica > limiar_falha_tecnica
+
+    _registrar_diagnostico_circuit_breaker("diagnostico_circuit_breaker_tracknme_http.jsonl", {
+        "etapa": etapa,
+        "total_canario": total,
+        "falha_tecnica": falha_tecnica,
+        "erro_negocio_esperado": erro_negocio_esperado,
+        "taxa_falha_tecnica": taxa_falha_tecnica,
+        "limiar_falha_tecnica": limiar_falha_tecnica,
+        "abortado": abortado,
+    })
+
+    if abortado:
         return {"motivo": "taxa_falha_tecnica", "taxa_falha_tecnica": taxa_falha_tecnica}
     return None
 
@@ -420,8 +450,22 @@ async def _etapa_incidente_2_estagios(
     Kill switch `tracknme_http_habilitado` (`system_parameters`, default
     desligado) — com ele desligado, o fluxo é 100% Estágio Playwright,
     idêntico ao existente antes desta mudança.
+
+    `_eh_erro_definitivo` (achado 2026-08-25, revisão da decisão antiga
+    de 2026-08-06 — volume real pós-reset, 1671 itens, ~90% duplicado no
+    canário): repassado pra `processar_fila_http`/`processar_fila`
+    (HTTP e Playwright) — `IncidenteDuplicadoError`/
+    `MultiplosIncidentesAbertosError`/"incidente já está..." (`tracknme_
+    bot.eh_erro_de_negocio_esperado`) são resultado de negócio
+    DETERMINÍSTICO, nunca mudam tentando de novo — não gastam as
+    tentativas restantes nem entram no round 2. Antes disso, esses erros
+    seguiam o retry padrão igual qualquer falha técnica, o que em
+    volume alto dobrava o tempo de execução à toa.
     """
     parametros = supabase_client.buscar_parametros()
+
+    def _eh_erro_definitivo(e: Exception) -> bool:
+        return tracknme_bot.eh_erro_de_negocio_esperado(str(e))
 
     on_item_iniciado = None
     if on_worker_status is not None:
@@ -464,10 +508,11 @@ async def _etapa_incidente_2_estagios(
                     contexto_http, canario, acao_http, concorrencia=concorrencia,
                     on_progresso=on_progresso, cancelar_checker=cancelar_checker,
                     on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
+                    eh_erro_definitivo=_eh_erro_definitivo,
                 )
                 resultados_totais.extend(resultados_canario)
 
-                http_abortado = _avaliar_circuit_breaker_tracknme_http(resultados_canario, parametros)
+                http_abortado = _avaliar_circuit_breaker_tracknme_http(resultados_canario, parametros, etapa)
                 if http_abortado is not None:
                     itens_playwright_pendentes = resto
                 elif resto:
@@ -476,6 +521,7 @@ async def _etapa_incidente_2_estagios(
                         contexto_http, resto, acao_http, concorrencia=concorrencia,
                         on_progresso=on_progresso, cancelar_checker=cancelar_checker,
                         on_item_iniciado=on_item_iniciado, timeout_segundos=timeout_segundos,
+                        eh_erro_definitivo=_eh_erro_definitivo,
                     )
                     resultados_totais.extend(resultados_resto)
             finally:
@@ -501,7 +547,7 @@ async def _etapa_incidente_2_estagios(
         resultados_pw, erro, reconexao, cancelamento = await _processar_fila_com_navegador(
             itens_playwright_pendentes, acao_playwright, on_progresso=on_progresso,
             cancelar_checker=cancelar_checker, descrever_item=_descrever_linha_incidente,
-            on_worker_status=on_worker_status,
+            on_worker_status=on_worker_status, eh_erro_definitivo=_eh_erro_definitivo,
         )
         if reconexao is not None:
             resultados_totais.extend(reconexao.processados)
@@ -574,9 +620,11 @@ async def etapa_fechar_incidentes_automaticos(
     `observacao_sistema` da linha; `numero_incidente` = `id` da linha
     (confirmado que é o mesmo número que a tela Operador busca) — evita
     ambiguidade quando a placa tem mais de um incidente aberto.
-    `IncidenteDuplicadoError`/`MultiplosIncidentesAbertosError` não têm
-    tratamento diferenciado (decisão do usuário) — seguem o retry padrão
-    igual qualquer outra falha de item.
+    `IncidenteDuplicadoError`/`MultiplosIncidentesAbertosError` (revisão
+    2026-08-25 da decisão original de 2026-08-06) agora têm tratamento
+    diferenciado — são erro de negócio determinístico
+    (`_eh_erro_definitivo`, `_etapa_incidente_2_estagios`), param na
+    primeira ocorrência, sem gastar retry à toa.
 
     **2 ESTÁGIOS, achado 2026-08-19** — mesmo padrão de `etapa_abrir_
     incidentes_automaticos`/`_etapa_incidente_2_estagios`, usando
@@ -691,10 +739,12 @@ def _situacoes_veiculo_sga_recentes(
     limiar_horas = float(parametros.get("tempo_limiar_atualizacao_sga_horas", 24))
     recentes = {}
     for chave, registro in conhecidas.items():
-        atualizado_em_bruto = registro.get("atualizado_em")
-        if not atualizado_em_bruto:
+        momento = registro.get("atualizado_em")
+        if not momento:
             continue
-        momento = datetime.fromisoformat(atualizado_em_bruto)
+        # `buscar_situacoes_veiculo_sga_em_lote` (achado 2026-08-25) já
+        # devolve `atualizado_em` convertido pra `datetime` -- nunca mais
+        # string ISO crua aqui, então nada de `fromisoformat` de novo.
         if momento.tzinfo is None:
             momento = momento.replace(tzinfo=timezone.utc)
         if (agora - momento).total_seconds() < limiar_horas * 3600:
@@ -778,6 +828,26 @@ def _persistir_situacoes_sga(resultados: list, agora: datetime) -> tuple[dict, l
     return situacoes_sga, falhas_persistencia
 
 
+def _registrar_diagnostico_circuit_breaker(nome_arquivo: str, diagnostico: dict) -> None:
+    """Log resiliente (2026-08-25, achado da sessão anterior: fechar a
+    janela do Painel Operador no meio de uma etapa mata o processo sem
+    nenhum resultado ser persistido — nem Supabase, nem `execucoes.log`,
+    nem o resultado da etapa em si — então a decisão de um circuit
+    breaker pode se perder por completo se algo interromper a execução
+    depois dela). Escreve UMA linha JSON em `logs/{nome_arquivo}`, na
+    hora exata da decisão — antes de qualquer chamada de rede adicional
+    (Playwright/resto do HTTP) que possa travar/cair depois. Reaproveitada
+    pelos 2 circuit breakers (SGA e Track N'Me). Nunca derruba a etapa
+    real (mesmo espírito de `catalogo_etapas._registrar_log_arquivo`)."""
+    try:
+        caminho = _diretorio_logs() / nome_arquivo
+        caminho.parent.mkdir(parents=True, exist_ok=True)
+        with open(caminho, "a", encoding="utf-8") as f:
+            f.write(json.dumps({**diagnostico, "registrado_em": datetime.now().isoformat()}, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001 - diagnóstico nunca pode derrubar a etapa real
+        pass
+
+
 def _avaliar_circuit_breaker_sga_http(resultados_canario: list, parametros: dict) -> dict | None:
     """Acha se o Estágio HTTP (achado 2026-08-19) deve ser abortado pro
     resto da execução, baseado na taxa de "não encontrado"/falha técnica
@@ -809,6 +879,21 @@ def _avaliar_circuit_breaker_sga_http(resultados_canario: list, parametros: dict
     elif taxa_nao_encontrado > limiar_nao_encontrado:
         motivo = "taxa_nao_encontrado"
     else:
+        motivo = None
+
+    _registrar_diagnostico_circuit_breaker("diagnostico_circuit_breaker_sga_http.jsonl", {
+        "total_canario": total,
+        "nao_encontrado": nao_encontrado,
+        "falha_tecnica": falha_tecnica,
+        "taxa_nao_encontrado": taxa_nao_encontrado,
+        "taxa_falha_tecnica": taxa_falha_tecnica,
+        "limiar_nao_encontrado": limiar_nao_encontrado,
+        "limiar_falha_tecnica": limiar_falha_tecnica,
+        "abortado": motivo is not None,
+        "motivo": motivo,
+    })
+
+    if motivo is None:
         return None
     return {"motivo": motivo, "taxa_nao_encontrado": taxa_nao_encontrado, "taxa_falha_tecnica": taxa_falha_tecnica}
 
@@ -1041,10 +1126,13 @@ async def etapa_consolidar_com_sga(
     vem com `origem` própria). `divergencias_instalacao`/`divergencias_
     remocao` (Bloco B, 2026-08-24: itens `REGRA_INSTALACAO_JA_FEITA`/
     `REGRA_TITULARIDADE` e `REGRA_REMOCAO_SGA_ATIVO`/`REGRA_REMOCAO_
-    EQUIPAMENTO_NAO_PERMITIDO`/`REGRA_REMOCAO_TITULARIDADE_*`) vêm
-    separados no retorno — nunca entram em `fila_operacional`/Tratativas,
-    alimentam as abas próprias "Análise de Divergência - Instalação"/"-
-    Remoção" na Fase E.
+    EQUIPAMENTO_NAO_PERMITIDO`/`REGRA_REMOCAO_TITULARIDADE_*`) e
+    `divergencias_manutencao` (2026-08-25: `REGRA_MANUTENCAO_
+    DIVERGENCIA_SGA`, mesmo item que já fecha o incidente automaticamente
+    via `REGRA_SGA_INATIVO`, só que também sinalizado aqui) vêm separados
+    no retorno — nunca entram em `fila_operacional`/Tratativas, alimentam
+    as abas próprias "Análise de Divergência - Instalação"/"- Remoção"/"-
+    Manutenção" na Fase E.
 
     Todos os parâmetros são opcionais, com o mesmo espírito de default
     das etapas anteriores (permitir rodar isolada no painel) — mas como
@@ -1084,6 +1172,7 @@ async def etapa_consolidar_com_sga(
         fila_operacional = [
             {**linha, "origem": "manutencao"} for linha in grupos_manutencao["grupo_3_tratativa_humana"]
         ] + tratativas_instalacao_remocao
+        divergencias_manutencao = grupos_manutencao.get("divergencias_manutencao", [])
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
         return ResultadoEtapa("consolidar_com_sga", sucesso=False, mensagem=_mensagem_com_notas(e))
 
@@ -1095,6 +1184,7 @@ async def etapa_consolidar_com_sga(
             "fila_operacional": fila_operacional,
             "divergencias_instalacao": divergencias_instalacao,
             "divergencias_remocao": divergencias_remocao,
+            "divergencias_manutencao": divergencias_manutencao,
         },
     )
 
@@ -1227,6 +1317,7 @@ def _sincronizar_atendente_da_aba(agora: datetime | None = None) -> dict[str, di
     chaves_da_aba = [chave for chave in ((linha.get("ID (hash)") or "").strip() for linha in linhas) if chave]
     situacao_manual_atual_por_chave = supabase_client.buscar_situacao_manual_atual_por_chaves(chaves_da_aba)
     agora_dt = agora or datetime.now()
+    atualizacoes: dict[str, dict] = {}
 
     for linha in linhas:
         chave = (linha.get("ID (hash)") or "").strip()
@@ -1278,9 +1369,9 @@ def _sincronizar_atendente_da_aba(agora: datetime | None = None) -> dict[str, di
         if situacao_manual != situacao_manual_atual_por_chave.get(chave, ""):
             campos_sync["situacao_manual_definida_em"] = agora_dt.isoformat() if situacao_manual else None
 
-        supabase_client.sincronizar_campos_atendente(chave, campos_sync)
-        sleep(ATRASO_ENTRE_CHAMADAS_SUPABASE_SEGUNDOS)
+        atualizacoes[chave] = campos_sync
 
+    supabase_client.sincronizar_campos_atendente_em_lote(atualizacoes)
     return atendente_por_chave
 
 
@@ -1485,6 +1576,25 @@ def _linha_divergencia_remocao_para_aba(linha: dict, chave_unica: str) -> dict:
     }
 
 
+def _linha_divergencia_manutencao_para_aba(linha: dict, chave_unica: str) -> dict:
+    """Monta uma linha da aba "Análise de Divergência - Manutenção"
+    (2026-08-25) a partir de um item de `divergencias_manutencao`
+    (`core.motor_regras._montar_linha_divergencia_manutencao`). Mesmo
+    espírito de `_linha_divergencia_para_aba`/`_linha_divergencia_
+    remocao_para_aba`: sem estado de atendente, sem "Motivo" (só existe
+    1 causa possível)."""
+    return {
+        "ID (hash)": chave_unica,
+        "Chassi": linha.get("chassi", ""),
+        "Placa": linha.get("placa", ""),
+        "Cliente": linha.get("cliente", ""),
+        "Evento": linha.get("evento", ""),
+        "Status SGA": linha.get("status_sga", ""),
+        "Observação": linha.get("observacao", ""),
+        "Ação": linha.get("acao", ""),
+    }
+
+
 _LIMITE_RODADAS_AUSENTE_PARA_FECHAR = 2
 
 
@@ -1527,14 +1637,16 @@ async def etapa_publicar_fila_operacional(
     agora: datetime | None = None,
     divergencias_instalacao: list[dict] | None = None,
     divergencias_remocao: list[dict] | None = None,
+    divergencias_manutencao: list[dict] | None = None,
 ) -> ResultadoEtapa:
     """Fase E — persiste `fila_operacional` (saída de
     `etapa_consolidar_com_sga`) em `tratativas` (Supabase) e reescreve a
     aba "Tratativas" da planilha Operacional. Também reescreve as abas
-    "Análise de Divergência - Instalação" (`divergencias_instalacao`) e
+    "Análise de Divergência - Instalação" (`divergencias_instalacao`),
     "Análise de Divergência - Remoção" (`divergencias_remocao`, Bloco B,
-    2026-08-24) — mecânico, sem Supabase, sem estado de atendente (ver
-    passo 5 abaixo).
+    2026-08-24) e "Análise de Divergência - Manutenção"
+    (`divergencias_manutencao`, 2026-08-25) — mecânico, sem Supabase, sem
+    estado de atendente (ver passo 5 abaixo).
 
     Async só por causa do default de `fila_operacional` (chama
     `etapa_consolidar_com_sga()`, que depende de Playwright/SGA) — o
@@ -1557,11 +1669,11 @@ async def etapa_publicar_fila_operacional(
        estão marcadas `Finalizado` (lido no passo 1) — uma linha some da
        aba quando o atendente confirma que já está resolvida, mesmo que
        o motor ainda a gere neste ciclo.
-    5. Reescreve "Análise de Divergência - Instalação"/"- Remoção" do
-       zero com `divergencias_instalacao`/`divergencias_remocao` — sem
-       upsert em `tratativas` (não são tratativas) e sem sincronizar
-       nada da aba antiga antes (não há campo editável pelo atendente
-       pra preservar).
+    5. Reescreve "Análise de Divergência - Instalação"/"- Remoção"/"-
+       Manutenção" do zero com `divergencias_instalacao`/`divergencias_
+       remocao`/`divergencias_manutencao` — sem upsert em `tratativas`
+       (não são tratativas) e sem sincronizar nada da aba antiga antes
+       (não há campo editável pelo atendente pra preservar).
     """
     if fila_operacional is None:
         resultado_consolidacao = await etapa_consolidar_com_sga()
@@ -1574,8 +1686,11 @@ async def etapa_publicar_fila_operacional(
             divergencias_instalacao = resultado_consolidacao.dados.get("divergencias_instalacao", [])
         if divergencias_remocao is None:
             divergencias_remocao = resultado_consolidacao.dados.get("divergencias_remocao", [])
+        if divergencias_manutencao is None:
+            divergencias_manutencao = resultado_consolidacao.dados.get("divergencias_manutencao", [])
     divergencias_instalacao = divergencias_instalacao if divergencias_instalacao is not None else []
     divergencias_remocao = divergencias_remocao if divergencias_remocao is not None else []
+    divergencias_manutencao = divergencias_manutencao if divergencias_manutencao is not None else []
 
     try:
         agora_dt = agora or datetime.now()
@@ -1637,6 +1752,19 @@ async def etapa_publicar_fila_operacional(
         with _anotar_erro("reescrever_aba:Analise_Divergencia_Remocao"):
             google_sheets_client.reescrever_aba(
                 google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Remoção", linhas_divergencia_remocao
+            )
+
+        linhas_divergencia_manutencao = [
+            _linha_divergencia_manutencao_para_aba(
+                linha, dedup.gerar_chave_unica(
+                    ORIGEM_MANUTENCAO, {"placa": linha.get("placa", ""), "evento": linha.get("evento", "")}
+                )
+            )
+            for linha in divergencias_manutencao
+        ]
+        with _anotar_erro("reescrever_aba:Analise_Divergencia_Manutencao"):
+            google_sheets_client.reescrever_aba(
+                google_sheets_client.NOME_PLANILHA_OPERACIONAL, "Análise de Divergência - Manutenção", linhas_divergencia_manutencao
             )
 
         # Depois das escritas principais (Sheets/Supabase já refletem esta

@@ -329,12 +329,16 @@ def _classificar_remocao(registro: dict, equipamento: dict | None, situacao_sga:
     4. `status == INATIVO`: titularidade divergente tem precedência
        sobre o filtro de modelo (decisão do usuário) -> se bater, sempre
        `REGRA_REMOCAO_TITULARIDADE_{tier}`, mesmo que o modelo também
-       não seja permitido. Senão, o candidato normal
-       (`REGRA_REMOCAO_PRAZO_{tier}` sem equipamento /
-       `REGRA_REMOCAO_ATIVA_{tier}` com equipamento) só vira tratativa
-       se o modelo do equipamento estiver na lista permitida -- sem
-       equipamento encontrado não dá pra confirmar o modelo, então
-       também bloqueia (`REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`).
+       não seja permitido. Senão, `REGRA_REMOCAO_PRAZO_{tier}` (sem
+       equipamento) ou `REGRA_REMOCAO_ATIVA_{tier}` (com equipamento) --
+       o filtro de modelo (`REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO`) só
+       se aplica quando HÁ equipamento encontrado pra checar o modelo
+       (decisão revertida 2026-08-25: até então, sem equipamento
+       encontrado também bloqueava — dado real da 1ª esteira A→E
+       pós-reset mostrou que isso escondia 2199 das 2213 divergências de
+       Remoção como "modelo não permitido" quando na verdade era
+       "equipamento não encontrado", deixando quase nenhuma remoção virar
+       tratativa de disparo de verdade; usuário confirmou reverter).
     """
     if not situacao_sga:
         return None
@@ -351,16 +355,17 @@ def _classificar_remocao(registro: dict, equipamento: dict | None, situacao_sga:
     dias = (agora.date() - desde_data).days
     tier = _tier(dias, _tier_remocao(parametros or {}))
 
-    if equipamento is not None:
-        cliente_cadastro = equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", "")
-        if _titularidade_diverge(registro.get("Nome Associado", ""), cliente_cadastro):
-            return f"REGRA_REMOCAO_TITULARIDADE_{tier}", dias
+    if equipamento is None:
+        return f"REGRA_REMOCAO_PRAZO_{tier}", dias
 
-    codigo_candidato = f"REGRA_REMOCAO_ATIVA_{tier}" if equipamento is not None else f"REGRA_REMOCAO_PRAZO_{tier}"
-    modelo_equipamento = equipamento.get(f"col_{COL_RASTREADORES_MODELO_EQUIPAMENTO}", "") if equipamento else ""
+    cliente_cadastro = equipamento.get(f"col_{COL_RASTREADORES_CLIENTE}", "")
+    if _titularidade_diverge(registro.get("Nome Associado", ""), cliente_cadastro):
+        return f"REGRA_REMOCAO_TITULARIDADE_{tier}", dias
+
+    modelo_equipamento = equipamento.get(f"col_{COL_RASTREADORES_MODELO_EQUIPAMENTO}", "")
     if not _modelo_removivel(modelo_equipamento, parametros or {}):
         return "REGRA_REMOCAO_EQUIPAMENTO_NAO_PERMITIDO", dias
-    return codigo_candidato, dias
+    return f"REGRA_REMOCAO_ATIVA_{tier}", dias
 
 
 def _classificar_registro(registro: dict, equipamento: dict | None, situacao_sga: dict | None,
