@@ -31,6 +31,15 @@ export default async function ConfiguracaoPage() {
     valoresIniciais[card.secao] = naoSecretos;
   }
 
+  // Versão atual do Painel Operador — usada só pra montar o caminho do
+  // .exe no comando de provisionamento pronto pra copiar (mesma tabela
+  // que já alimenta GET /api/operador/versao-atual).
+  const { data: versaoRow } = await supabase
+    .from("launcher_versao_atual")
+    .select("versao")
+    .maybeSingle();
+  const versaoAtual = versaoRow?.versao ?? "";
+
   return (
     <>
       <div className="page-header">
@@ -42,7 +51,7 @@ export default async function ConfiguracaoPage() {
         </div>
       </div>
 
-      <ConfiguracaoClient valoresIniciais={valoresIniciais} />
+      <ConfiguracaoClient valoresIniciais={valoresIniciais} versaoAtual={versaoAtual} />
     </>
   );
 }

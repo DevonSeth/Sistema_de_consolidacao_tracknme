@@ -1,8 +1,11 @@
 "use server";
 
+import { randomBytes } from "node:crypto";
+
 import { revalidatePath } from "next/cache";
 
 import { obterAccessToken } from "@/lib/google-auth";
+import { sha256 } from "@/lib/provisionamento";
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
 import { lerSegredo, lerSegredoRaw } from "@/lib/vault-credenciais";
 
@@ -10,6 +13,9 @@ import { CAMPOS_SECAO, CAMPOS_SECRETOS, type Secao } from "./meta";
 
 type ResultadoAction = { erro?: string };
 type ResultadoTeste = { ok: boolean; mensagem: string };
+type ResultadoToken = { token?: string; expiraEm?: string; erro?: string };
+
+const VALIDADE_TOKEN_HORAS = 2;
 
 async function gravarSegredo(secao: string, valores: Record<string, unknown>): Promise<void> {
   const supabase = createSupabaseServiceClient();
@@ -135,4 +141,37 @@ export async function testarConexaoAction(secao: Secao): Promise<ResultadoTeste>
   } catch (e) {
     return { ok: false, mensagem: e instanceof Error ? e.message : "Erro desconhecido." };
   }
+}
+
+/**
+ * Gera um token de uso único pra provisionar uma máquina nova do Painel
+ * Operador — consumido por `POST /api/operador/provisionar`
+ * (`webapp/src/app/api/operador/provisionar/route.ts`). Só o hash
+ * (`sha256`) é gravado em `provisioning_tokens.token_hash`; o token em
+ * claro só existe nesta resposta, exibido uma única vez pro Admin (mesmo
+ * princípio de `chave_maquina`, não é recuperável depois).
+ *
+ * Mesmo formato/contrato já validado em produção via
+ * `_handoff/verificar_provisionamento.py::_inserir_token`.
+ */
+export async function gerarTokenProvisionamentoAction(rotuloMaquina: string): Promise<ResultadoToken> {
+  const rotulo = rotuloMaquina.trim();
+  if (!rotulo) {
+    return { erro: "Rótulo da máquina é obrigatório." };
+  }
+
+  const token = randomBytes(32).toString("base64url");
+  const expiraEm = new Date(Date.now() + VALIDADE_TOKEN_HORAS * 60 * 60 * 1000).toISOString();
+
+  const supabase = createSupabaseServiceClient();
+  const { error } = await supabase.from("provisioning_tokens").insert({
+    token_hash: sha256(token),
+    rotulo_maquina: rotulo,
+    expira_em: expiraEm,
+  });
+  if (error) {
+    return { erro: error.message };
+  }
+
+  return { token, expiraEm };
 }

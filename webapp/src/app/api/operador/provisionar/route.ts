@@ -1,23 +1,22 @@
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 
 import { createSupabaseServiceClient } from "@/lib/supabase-server";
+import { sha256 } from "@/lib/provisionamento";
 import { lerSegredo, lerSegredoRaw } from "@/lib/vault-credenciais";
 
 /**
  * Provisionamento de máquina nova — recebe um token de uso único gerado
- * pelo Painel Admin, devolve o pacote de credenciais decifrado do Vault
- * (Supabase) + uma chave de máquina nova pra sincronizações futuras via
- * `GET /api/operador/credenciais/versao` (Fase 0, passo 0.8).
+ * pelo Painel Admin (`webapp/src/app/admin/configuracao/actions.ts::
+ * gerarTokenProvisionamentoAction`), devolve o pacote de credenciais
+ * decifrado do Vault (Supabase) + uma chave de máquina nova pra
+ * sincronizações futuras via `GET /api/operador/credenciais/versao`
+ * (Fase 0, passo 0.8).
  *
  * Schema (`provisioning_tokens`/`maquinas_operador`/`credenciais_versao`)
  * já rodado em produção — ver `_handoff/sql_fase0_vault_credenciais.sql`.
  */
 
 const SECOES_JSON = ["tracknme", "newmo", "supabase", "google_sheets"] as const;
-
-function sha256(valor: string): string {
-  return createHash("sha256").update(valor).digest("hex");
-}
 
 export async function POST(request: Request) {
   let token: string;
