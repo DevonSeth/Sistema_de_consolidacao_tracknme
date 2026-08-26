@@ -437,6 +437,22 @@ ANSI pelo PowerShell 5.1; Python lida com Unicode nativamente), arquivos
 direto na raiz do zip (~401MB). Publicado como release real `v1.0.0`
 (não pre-release) no GitHub.
 
+**Achado 2026-08-26, ao instalar numa máquina genuinamente nova**: até
+essa data, só o `PainelOperador-*.zip` era anexado a cada release — o
+`Launcher.exe` em si (o único `.exe` que precisa chegar numa máquina
+nova, é ele quem registra o protocolo `tracknme-operador://` e baixa o
+resto sozinho) nunca tinha um jeito público de download. O botão "Abrir
+Painel Operador" do Admin virava um beco sem saída em qualquer máquina
+que nunca tinha instalado nada. **Corrigido**: `Launcher.exe`
+(`pyinstaller Launcher.spec`) também deve ser anexado a toda release
+nova, junto do `.zip` do Painel — o Admin usa a URL estável `https://
+github.com/{owner}/{repo}/releases/latest/download/Launcher.exe`
+(sempre resolve pro asset da release marcada "latest", não precisa
+atualizar o link a cada versão). **Não esquecer este passo nas
+próximas releases** — senão o link de download do Launcher no Admin
+(`webapp/src/app/admin/layout.tsx`) volta a apontar pra um asset que não
+existe mais na release mais recente.
+
 ### 1.7 🤖 Atualizar `launcher_versao_atual` com a release real — CONCLUÍDO 2026-08-15
 
 `INSERT` direto (via `service_role_key`) gravando `versao=1.0.0`,
