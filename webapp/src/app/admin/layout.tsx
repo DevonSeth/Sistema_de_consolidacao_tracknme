@@ -63,9 +63,24 @@ export default async function AdminLayout({ children }: { children: ReactNode })
         <a
           className="nav-item"
           href="tracknme-operador://abrir"
-          title="Requer o Painel Operador instalado nesta máquina"
+          title="Requer o Launcher já ter rodado ao menos 1 vez nesta máquina"
         >
           <span className="ic">🖥</span> Abrir Painel Operador
+        </a>
+        {/* Achado 2026-08-26: numa máquina nova, o link acima não faz nada
+            até o Launcher.exe rodar 1x (é ele que registra o protocolo
+            tracknme-operador:// no Windows) — sem um jeito de baixá-lo,
+            o botão parecia quebrado. `/releases/latest/download/<asset>`
+            é a URL estável do GitHub: resolve pro asset da release
+            marcada "latest", sem precisar mudar este link a cada versão
+            nova — só é preciso lembrar de sempre anexar Launcher.exe na
+            release mais recente (ver docs/deploy_vercel.md seção 1.6). */}
+        <a
+          className="nav-item nav-item-secundario"
+          href="https://github.com/DevonSeth/Sistema_de_consolidacao_tracknme/releases/latest/download/Launcher.exe"
+          title="Baixe e rode 1 vez — só necessário na 1ª vez nesta máquina"
+        >
+          <span className="ic">⬇</span> Baixar Launcher (1ª vez nesta máquina)
         </a>
 
         <div className="sidebar-footer">
