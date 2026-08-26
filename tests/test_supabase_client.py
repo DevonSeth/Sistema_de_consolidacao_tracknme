@@ -475,7 +475,13 @@ def test_sincronizar_campos_atendente_chave_inexistente_nao_grava_historico(monk
 # buscar_estado_atendente_por_chaves / sincronizar_campos_atendente_em_lote
 # (achado 2026-08-25: pro fluxo de volume real, Fase E, substitui o uso em
 # loop da sincronizar_campos_atendente por-linha pelo mesmo padrão em lote
-# de upsert_tratativas_em_lote)
+# de upsert_tratativas_em_lote; achado 2026-08-26 em produção real: o
+# upsert quebrava com "null value in column 'origem' violates not-null
+# constraint" -- só preservar 4 colunas heterogêneas não bastava, QUALQUER
+# coluna NOT NULL da tabela ausente do payload quebra um upsert, já que
+# o INSERT por baixo do ON CONFLICT valida antes de resolver o conflito.
+# Corrigido buscando a linha INTEIRA — fixtures abaixo incluem "origem"
+# pra provar isso.)
 # --------------------------------------------------------------------------
 
 def test_buscar_estado_atendente_por_chaves_vazio_nao_consulta(monkeypatch):
@@ -506,7 +512,8 @@ def test_sincronizar_campos_atendente_em_lote_sem_status_nao_grava_historico(mon
     cliente = _ClienteFalso(retornos={
         "tratativas": [[{
             "id": "trat-1", "chave_unica": "chave-1", "status": "aguardando_resposta",
-            "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+            "origem": "instalacao", "data_agendada": None, "status_contato": None,
+            "situacao_manual_definida_em": None,
         }]],
     })
     monkeypatch.setattr(sc, "get_client", lambda: cliente)
@@ -516,6 +523,7 @@ def test_sincronizar_campos_atendente_em_lote_sem_status_nao_grava_historico(mon
     assert _chamadas_insert(cliente, "historico_status_tratativa") == []
     upserts = _chamadas_upsert(cliente, "tratativas")
     assert upserts[0][0]["status"] == "aguardando_resposta"
+    assert upserts[0][0]["origem"] == "instalacao"
 
 
 def test_sincronizar_campos_atendente_em_lote_finalizado_seta_finalizado_em_e_historico(monkeypatch):
@@ -576,12 +584,13 @@ def test_sincronizar_campos_atendente_em_lote_preserva_campos_nao_tocados_do_lot
         "tratativas": [[
             {
                 "id": "id-1", "chave_unica": "chave-1", "status": "aguardando_resposta",
-                "data_agendada": "2026-09-01", "status_contato": "invalido",
+                "origem": "instalacao", "data_agendada": "2026-09-01", "status_contato": "invalido",
                 "situacao_manual_definida_em": "2026-08-01T00:00:00+00:00",
             },
             {
                 "id": "id-2", "chave_unica": "chave-2", "status": "pendente",
-                "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+                "origem": "manutencao", "data_agendada": None, "status_contato": None,
+                "situacao_manual_definida_em": None,
             },
         ]],
     })
@@ -597,8 +606,41 @@ def test_sincronizar_campos_atendente_em_lote_preserva_campos_nao_tocados_do_lot
     assert payload_por_chave["chave-1"]["data_agendada"] == "2026-09-01"
     assert payload_por_chave["chave-1"]["status_contato"] == "invalido"
     assert payload_por_chave["chave-1"]["situacao_manual_definida_em"] == "2026-08-01T00:00:00+00:00"
+    assert payload_por_chave["chave-1"]["origem"] == "instalacao"
     assert payload_por_chave["chave-2"]["status"] == sc.STATUS_FINALIZADO
     assert payload_por_chave["chave-2"]["status_contato"] is None
+    assert payload_por_chave["chave-2"]["origem"] == "manutencao"
+
+
+def test_sincronizar_campos_atendente_em_lote_payload_traz_a_linha_inteira(monkeypatch):
+    """Achado real em produção 2026-08-26 (1ª rodada numa máquina nova):
+    o upsert quebrava com 'null value in column "origem" violates
+    not-null constraint' -- a versão anterior só preservava 4 colunas
+    heterogêneas explicitamente, então QUALQUER outra coluna NOT NULL da
+    tabela ausente do payload (origem, chassi, cliente, etc.) quebrava
+    um upsert em lote (o INSERT por baixo do ON CONFLICT valida colunas
+    NOT NULL antes de resolver o conflito, mesmo a linha já existindo).
+    Prova que o payload final é a linha inteira (todas as colunas reais
+    da tabela), não só um subconjunto."""
+    cliente = _ClienteFalso(retornos={
+        "tratativas": [[{
+            "id": "id-1", "chave_unica": "chave-1", "origem": "manutencao",
+            "chassi": "CHASSI123", "placa": "ABC1234", "cliente": "Fulano de Tal",
+            "status": "pendente", "created_at": "2026-08-01T00:00:00+00:00",
+            "data_agendada": None, "status_contato": None, "situacao_manual_definida_em": None,
+        }]],
+    })
+    monkeypatch.setattr(sc, "get_client", lambda: cliente)
+
+    sc.sincronizar_campos_atendente_em_lote({"chave-1": {"selecionado": True}})
+
+    payload = _chamadas_upsert(cliente, "tratativas")[0][0]
+    assert payload["origem"] == "manutencao"
+    assert payload["chassi"] == "CHASSI123"
+    assert payload["placa"] == "ABC1234"
+    assert payload["cliente"] == "Fulano de Tal"
+    assert payload["selecionado"] is True
+    assert "updated_at" in payload
 
 
 # --------------------------------------------------------------------------

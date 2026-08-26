@@ -546,12 +546,11 @@ def buscar_situacao_manual_atual_por_chaves(chaves: list[str]) -> dict[str, str]
 
 @retry_erro_transitorio_windows()
 def buscar_estado_atendente_por_chaves(chaves: list[str]) -> dict[str, dict]:
-    """Estado atual de `id`/`status`/`data_agendada`/`status_contato`/
-    `situacao_manual_definida_em` por `chave_unica` — usado por
+    """Linha COMPLETA (`select("*")`) por `chave_unica` — usado por
     `sincronizar_campos_atendente_em_lote` pra completar, em todo payload
-    de um lote heterogêneo, os campos que a linha da planilha não tocou
-    (ver docstring de `sincronizar_campos_atendente_em_lote`, achado
-    2026-08-25).
+    de um lote heterogêneo, TODAS as colunas que a linha da planilha não
+    tocou (ver docstring de `sincronizar_campos_atendente_em_lote`,
+    achado 2026-08-26).
 
     **Dividido em mini-lotes de `_TAMANHO_LOTE_TRATATIVAS` itens** (mesmo
     achado 2026-08-21 de `buscar_estado_disparo_por_chaves`).
@@ -567,7 +566,7 @@ def buscar_estado_atendente_por_chaves(chaves: list[str]) -> dict[str, dict]:
         try:
             linhas = (
                 client.table("tratativas")
-                .select("id, chave_unica, status, data_agendada, status_contato, situacao_manual_definida_em")
+                .select("*")
                 .in_("chave_unica", lote_chaves)
                 .execute()
                 .data
@@ -659,13 +658,24 @@ def sincronizar_campos_atendente_em_lote(atualizacoes: dict[str, dict]) -> None:
     **`campos` é heterogêneo por linha** (`data_agendada`/`status`/
     `status_contato`/`situacao_manual_definida_em` só entram
     condicionalmente — ver `orchestrator.pipeline._sincronizar_atendente_
-    da_aba`). Um upsert em lote do PostgREST monta o `ON CONFLICT DO
-    UPDATE` pela união de colunas de TODO o lote (mesmo achado já
-    documentado em `upsert_tratativas_em_lote`): uma linha sem `status`
-    no seu payload teria a coluna sobrescrita com `NULL` só porque outra
-    linha do mesmo lote tinha. Por isso o estado atual dessas 4 colunas
-    é buscado em lote primeiro (`buscar_estado_atendente_por_chaves`) e
-    sempre completado explicitamente em TODO payload.
+    da_aba`). Um upsert em lote do PostgREST sempre monta um `INSERT ...
+    ON CONFLICT DO UPDATE` por baixo — e o Postgres valida as colunas
+    `NOT NULL` da tabela contra a cláusula `INSERT` ANTES de sequer
+    avaliar o conflito, mesmo quando a linha já existe e vai só
+    atualizar. **Achado real em produção 2026-08-26** (1ª rodada numa
+    máquina nova): um lote cujo payload só tinha os campos de atendente
+    (sem `origem`, `chassi` etc.) quebrou com `null value in column
+    "origem" violates not-null constraint" — a versão anterior só
+    preservava 4 colunas (as heterogêneas), não a linha inteira,
+    então QUALQUER outra coluna `NOT NULL` da tabela ausente do payload
+    também quebraria (não só `status`/`data_agendada`/etc., como o
+    achado original de 2026-08-25 já alertava — só não cobria TODAS as
+    colunas). **Corrigido**: `buscar_estado_atendente_por_chaves` agora
+    busca a linha INTEIRA (`select("*")`) e cada payload começa como uma
+    cópia completa dela, com `campos` sobrepondo só o que realmente
+    mudou — mesmo princípio (nunca upsertar um payload parcial) já usado
+    em `upsert_tratativas_em_lote`, só que a "base completa" vem de uma
+    leitura fresca em vez de já estar pronta na mão de quem chama.
 
     **Update puro, sem fallback de insert**: `chave_unica` que não
     existir (ex: linha de exemplo/placeholder ainda na planilha, ou
@@ -682,16 +692,12 @@ def sincronizar_campos_atendente_em_lote(atualizacoes: dict[str, dict]) -> None:
         return
     estado_atual = buscar_estado_atendente_por_chaves(list(atualizacoes))
 
-    campos_preservados = ("data_agendada", "status", "status_contato", "situacao_manual_definida_em")
     payloads = []
     for chave, campos in atualizacoes.items():
         estado = estado_atual.get(chave)
         if estado is None:
             continue
-        payload = {"chave_unica": chave, **campos}
-        for campo in campos_preservados:
-            if campo not in payload:
-                payload[campo] = estado.get(campo)
+        payload = {**estado, **campos, "updated_at": _agora_utc_iso()}
         if "status" in campos:
             payload.setdefault("finalizado_em", _agora_utc_iso())
         payloads.append(payload)
