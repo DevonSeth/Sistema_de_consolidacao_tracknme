@@ -1809,9 +1809,14 @@ def etapa_disparo_mensagens(
       uma vez só, não por item — `agora` é fixo pra toda a execução,
       então o resultado seria idêntico item a item.
 
-    Uma falha de envio de UM item (transporte, ou qualquer exceção
-    inesperada de `newmo_client.enviar_template`) não derruba o lote
-    inteiro — conta como falha e segue pro próximo.
+    Uma falha de envio de UM item (transporte, ou qualquer classificação
+    da Newmo que não seja "sucesso"/"contato_invalido" — cods 2/3/5/6/8,
+    ver `integrations.newmo_client`) não derruba o lote inteiro —
+    registrada em `dados["falhas"]` (lista, mesmo contrato de
+    `sem_atendimento`: `item`/`erro`/`descricao` por linha, com o código
+    e mensagem reais da Newmo) e segue pro próximo. Achado 2026-08-26:
+    antes disso era só um contador cego, sem detalhe nenhum — 1ª rodada
+    real de F.1 teve ~122 falhas assim, impossível diagnosticar depois.
     """
     try:
         agora = agora or datetime.now()
@@ -1834,7 +1839,8 @@ def etapa_disparo_mensagens(
         bases_por_id = {b["id"]: b for b in supabase_client.buscar_bases_ativas()}
         pontos_acao_por_id = {p["id"]: p for p in supabase_client.buscar_pontos_acao_ativos()}
 
-        enviadas = contatos_invalidos = falhas = 0
+        enviadas = contatos_invalidos = 0
+        falhas: list[dict] = []
         sem_atendimento: list[dict] = []
         total_elegiveis = len(elegiveis)
         for indice, tratativa in enumerate(elegiveis):
@@ -1874,12 +1880,15 @@ def etapa_disparo_mensagens(
             codigo = config["templates"].get(nome_logico)
             variaveis = mensagens.variaveis_template(nome_logico, tratativa, base, ponto_acao)
 
+            descricao_item = f"{tratativa.get('cliente', '')} ({tratativa.get('identificador', '')})"
             try:
                 resultado_envio = newmo_client.enviar_template(
                     tratativa["telefone"], codigo, variaveis, config["canal_guid"], config["setor_id"]
                 )
-            except Exception:  # noqa: BLE001 - um item ruim não derruba o lote inteiro
-                falhas += 1
+            except Exception as e:  # noqa: BLE001 - um item ruim não derruba o lote inteiro
+                falhas.append({
+                    "item": tratativa.get("chave_unica"), "erro": str(e), "descricao": descricao_item,
+                })
                 continue
 
             if resultado_envio["classificacao"] == "sucesso":
@@ -1892,7 +1901,18 @@ def etapa_disparo_mensagens(
                 supabase_client.marcar_contato_invalido(tratativa["id"])
                 contatos_invalidos += 1
             else:
-                falhas += 1
+                # Achado 2026-08-26: antes só incrementava um contador cego
+                # (dados["falhas"] como int) -- sem item/código/mensagem
+                # registrado em lugar nenhum (nem tela, nem log em arquivo,
+                # já que `_registrar_log_arquivo` espera uma LISTA aqui,
+                # mesmo contrato de `sem_atendimento`). 1ª rodada real de
+                # F.1 (Base Afogados) teve ~122 falhas assim, sem nenhum
+                # jeito de saber o motivo depois do fato.
+                falhas.append({
+                    "item": tratativa.get("chave_unica"),
+                    "erro": f"cod {resultado_envio.get('cod')}: {resultado_envio.get('mensagem') or 'erro desconhecido'}",
+                    "descricao": descricao_item,
+                })
     except Exception as e:  # noqa: BLE001 - nunca deixa exceção subir até a UI
         return ResultadoEtapa("disparo_mensagens", sucesso=False, mensagem=_mensagem_com_notas(e))
 

@@ -3025,7 +3025,7 @@ def test_etapa_disparo_mensagens_sucesso_atualiza_apos_envio(monkeypatch):
 
     assert resultado.sucesso is True
     assert resultado.dados == {
-        "enviadas": 1, "contato_invalido": 0, "falhas": 0, "total_elegiveis": 1, "sem_atendimento": [],
+        "enviadas": 1, "contato_invalido": 0, "falhas": [], "total_elegiveis": 1, "sem_atendimento": [],
     }
     assert len(chamadas_envio) == 1
     assert chamadas_envio[0]["destinatario"] == "+5581987654321"
@@ -3040,7 +3040,7 @@ def test_etapa_disparo_mensagens_contato_invalido_nao_consome_tentativa(monkeypa
     resultado = orch.etapa_disparo_mensagens([_tratativa_disparo()], agora=_AGORA_DIA_UTIL)
 
     assert resultado.dados == {
-        "enviadas": 0, "contato_invalido": 1, "falhas": 0, "total_elegiveis": 1, "sem_atendimento": [],
+        "enviadas": 0, "contato_invalido": 1, "falhas": [], "total_elegiveis": 1, "sem_atendimento": [],
     }
     assert chamadas_invalido == ["tratativa-1"]
     assert chamadas_atualizar == []
@@ -3082,9 +3082,12 @@ def test_etapa_disparo_mensagens_falha_temporaria_nao_grava_nada(monkeypatch):
 
     resultado = orch.etapa_disparo_mensagens([_tratativa_disparo()], agora=_AGORA_DIA_UTIL)
 
-    assert resultado.dados == {
-        "enviadas": 0, "contato_invalido": 0, "falhas": 1, "total_elegiveis": 1, "sem_atendimento": [],
-    }
+    assert resultado.dados["enviadas"] == 0
+    assert resultado.dados["contato_invalido"] == 0
+    assert resultado.dados["total_elegiveis"] == 1
+    assert resultado.dados["sem_atendimento"] == []
+    assert len(resultado.dados["falhas"]) == 1
+    assert resultado.dados["falhas"][0]["erro"] == "cod 4: x"
     assert chamadas_atualizar == []
     assert chamadas_invalido == []
 
@@ -3100,9 +3103,12 @@ def test_etapa_disparo_mensagens_excecao_de_transporte_conta_como_falha_sem_derr
     )
 
     assert resultado.sucesso is True
-    assert resultado.dados == {
-        "enviadas": 0, "contato_invalido": 0, "falhas": 2, "total_elegiveis": 2, "sem_atendimento": [],
-    }
+    assert resultado.dados["enviadas"] == 0
+    assert resultado.dados["contato_invalido"] == 0
+    assert resultado.dados["total_elegiveis"] == 2
+    assert resultado.dados["sem_atendimento"] == []
+    assert len(resultado.dados["falhas"]) == 2
+    assert all(f["erro"] == "timeout" for f in resultado.dados["falhas"])
     assert len(chamadas_envio) == 2  # o 2º item foi tentado mesmo o 1º tendo estourado
 
 
