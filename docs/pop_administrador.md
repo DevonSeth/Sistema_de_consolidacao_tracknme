@@ -261,6 +261,57 @@ ainda não "nasceu" pro sistema de verdade. Confirme com o SGA (ou peça
 pro atendimento confirmar) se o associado realmente já saiu da
 cooperativa.
 
+## Abas de "Análise de Divergência" (planilha Operacional) — o sistema escreve sozinho
+
+Desde 2026-08-13 (Instalação), 2026-08-24 (Remoção) e 2026-08-25
+(Manutenção), a planilha **"Operacional - Pendencias - Puma"** (a mesma
+que o atendimento usa, ver `docs/pop_operador.md`) tem 3 abas extras
+que **você não preenche** — são relatórios mecânicos, reescritos do
+zero a cada execução, pra dar visibilidade a situações que o sistema
+decidiu que **não** devem virar tratativa de atendimento (não entram em
+`Tratativas`, não têm nível de urgência), mas que costumam indicar um
+dado desatualizado na sua aba `Instalação-Remoção`:
+
+- **`Análise de Divergência - Instalação`** — uma linha sua de
+  `Serviço = Instalação` cujo chassi **já aparece em "Rastreadores
+  Ativos"** (a instalação já foi feita fisicamente, só ninguém
+  atualizou o cadastro) ou cujo nome de associado não bate mais com o
+  cadastro do Track N' Me (titularidade divergente). Não exige nenhuma
+  ação urgente — é só um aviso de que aquela linha específica não
+  representa mais uma pendência real. Some sozinha da aba quando o dado
+  de origem for atualizado (nova linha, mesmo `Chassi` — regra 1 da
+  seção 6).
+- **`Análise de Divergência - Remoção`** — uma linha sua de
+  `Serviço = Retirada` que caiu numa de 3 situações que não viram
+  tratativa: (1) o SGA ainda mostra o veículo `ATIVO` (mesmo gating já
+  descrito na seção 9 — antes isso ficava só "invisível", agora aparece
+  aqui pra acompanhamento); (2) o equipamento foi encontrado em
+  "Rastreadores Ativos", mas o **modelo dele não está na lista
+  `modelos_removiveis`** (parâmetro do Painel Admin, ver seção 11); (3)
+  titularidade divergente (nome do associado não bate com o cadastro do
+  Track N' Me). **Importante (decisão revista 2026-08-25)**: se o
+  equipamento simplesmente **não for encontrado** em "Rastreadores
+  Ativos", isso **não** cai mais aqui — vira uma tratativa normal na
+  aba `Tratativas`, disparando WhatsApp normalmente. Até então, "não
+  encontrado" também bloqueava aqui junto com "modelo não permitido" —
+  na prática isso escondia quase toda divergência real de remoção como
+  se fosse problema de modelo, quando o caso mais comum era mesmo só
+  precisar ir buscar o equipamento.
+- **`Análise de Divergência - Manutenção`** (nova, 2026-08-25) — um
+  incidente de manutenção cujo SGA voltou um status diferente de
+  `ATIVO`/"não encontrado" (ex: `INATIVO`, `INADIMPLENTE`,
+  `CANCELADO`). O sistema já fecha esse incidente sozinho no Track N'
+  Me nesse caso (nada muda nesse comportamento) — esta aba só avisa que
+  fisicamente o rastreador continua comunicando num veículo que, pela
+  cooperativa, não deveria mais estar com ele. Vale a pena confirmar se
+  o contrato desse associado foi cancelado de verdade e, se sim, tratar
+  como uma remoção física pendente (cadastrar na `Instalação-Remoção`
+  se ainda não estiver lá).
+
+Nenhuma das 3 abas tem coluna editável — não digite nada nelas. Detalhe
+técnico completo (cabeçalho coluna a coluna) em
+`docs/planilha_operacional.md`.
+
 ## Painel do administrador — app web, login real (revisto 2026-08-11, chat novo #8)
 
 **Decisão de 2026-08-10 ("painel único e compartilhado")
@@ -321,8 +372,12 @@ editáveis aqui, com busca e filtro por categoria (Geral, Risco de
 veículo, Prazos, Esteira de disparo, Observabilidade). Exemplos: quantas
 horas um equipamento fica sem comunicar antes de virar incidente,
 quais modelos de moto contam como "alto risco de furto", o horário de
-corte do disparo de WhatsApp. **Editar aqui tem efeito imediato no
-próximo ciclo automático** — não precisa de deploy nem reiniciar nada.
+corte do disparo de WhatsApp, e **quais modelos de rastreador podem
+ser removidos** (`modelos_removiveis` — lista vazia bloqueia toda
+remoção: nenhuma vira tratativa até essa lista ser configurada, todas
+caem em "Análise de Divergência - Remoção", ver seção acima). **Editar
+aqui tem efeito imediato no próximo ciclo automático** — não precisa de
+deploy nem reiniciar nada.
 Use a busca se não souber em qual categoria um parâmetro está; o texto
 de cada linha já explica o que ele controla.
 

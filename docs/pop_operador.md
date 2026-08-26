@@ -79,36 +79,46 @@ completo com prazos reais na seção 11.
 
 ## 3. Status atual do sistema (leia antes de tudo)
 
-Nem toda parte do fluxo acima/abaixo já está funcionando de verdade
-hoje (atualizado 2026-08-10):
+Todo o fluxo abaixo já está **funcionando de verdade em produção**
+(atualizado 2026-08-26 — os 14/14 templates foram aprovados pela Meta e
+o disparo automático foi liberado em 2026-08-11):
 
 | Parte do fluxo | Status |
 |---|---|
 | Cálculo de urgência, abertura/fechamento automático de incidente, publicação em `Tratativas` | **Funcionando** |
-| Disparo de mensagem por WhatsApp (Newmo) | **Código pronto**, mas ainda **aguardando a aprovação de todos os templates pela Meta** (2 dos 14 ainda em revisão) antes de rodar contra pendência real |
+| Disparo de mensagem por WhatsApp (Newmo) | **Funcionando** |
 | Escalonamento pra ligação depois de 3 tentativas sem resposta | **Funcionando** |
 | Registrar resultado da ligação e encaminhar pra Puma | **Funcionando** |
-| O associado responder o WhatsApp por um botão (grava `Retorno do Associado`) e a aba `Alertas` (seção 13) | **Código pronto e validado**, mas ainda **aguardando o cadastro da URL no painel do Newmo** e a criação da aba `Alertas` na planilha real — até isso acontecer, respostas do associado não chegam ao sistema |
+| O associado responder o WhatsApp por um botão (grava `Retorno do Associado`) e a aba `Alertas` (seção 13) | **Funcionando** |
 
 **Na prática, hoje**: a aba `Tratativas` já reflete a fila real de
-pendências, priorizada por urgência — isso já pode ser usado, e as
-colunas `Atendimento`/`Base`/`Ponto de Ação` (seção 7) já **precisam**
-ser preenchidas antes do 1º disparo, mesmo enquanto os templates da
-Meta ainda não foram todos aprovados — não custa nada preencher
-adiantado. Assim que a Meta aprovar o restante dos templates, o disparo
-passa a rodar de verdade sem precisar de mais nenhum ajuste de código.
+pendências, priorizada por urgência, e as colunas `Atendimento`/`Base`/
+`Ponto de Ação` (seção 7) **precisam** ser preenchidas antes do 1º
+disparo — não há mais nenhuma parte do fluxo aguardando aprovação
+externa ou configuração pendente.
 
 ## 4. Ferramentas (duas, com papéis diferentes)
 
 1. **Google Sheets, planilha "Operacional - Pendencias - Puma"** (abas
-   `Tratativas`, `Pendente de Ligação`, `Encaminhar pra Puma`) — é aqui
-   que o trabalho de atendimento acontece de fato: revisar prioridades,
-   marcar quem contatar, registrar resultado de ligação.
-2. **Aplicativo local (pywebview)** — painel de controle só pra
-   rodar/monitorar as etapas automáticas do sistema (baixar relatórios,
-   rodar motor de regras, disparar mensagens, etc.). **Ainda não foi
-   construído** (só existe no design). **Não é onde o trabalho de
-   revisão de pendências acontece** — isso é sempre na planilha.
+   `Tratativas`, `Pendente de Ligação`, `Encaminhar pra Puma`, `Alertas`
+   — ver seções 7 a 9 e 13 — e mais 3 abas só de leitura, **`Análise de
+   Divergência - Instalação`/`- Remoção`/`- Manutenção`**, escritas
+   sozinhas pelo sistema pra sinalizar cadastro desatualizado ou
+   equipamento que ainda comunica mas já deveria ter sido removido —
+   você não preenche nada nelas, detalhe de cada uma em
+   `docs/pop_administrador.md`) — é aqui que o trabalho de atendimento
+   acontece de fato: revisar prioridades, marcar quem contatar,
+   registrar resultado de ligação.
+2. **Painel Operador (app instalado, pywebview)** — painel de controle
+   pra rodar/monitorar as etapas automáticas do sistema (baixar
+   relatórios, rodar motor de regras, disparar mensagens etc.). O menu
+   lateral tem 3 itens: **"Fases da Automação"** (rodar/acompanhar as
+   etapas, ver seção 6), **"Dashboard"** (gráficos e métricas de apoio
+   pra priorizar o dia) e **"Manual"** (versão resumida deste mesmo
+   documento, embutida no app, pra consulta rápida sem precisar abrir
+   este arquivo — ver nota no topo deste documento). **Não é onde o
+   trabalho de revisão de pendências acontece** — isso é sempre na
+   planilha.
 
 ## 5. Conceitos fundamentais (glossário rápido)
 
@@ -153,9 +163,9 @@ passa a rodar de verdade sem precisar de mais nenhum ajuste de código.
 
 ## 6. Rotina diária
 
-1. Abrir o aplicativo (quando existir) e rodar a rotina do dia — todas
-   as etapas de uma vez, ou retomar de onde parou se o dia anterior foi
-   interrompido.
+1. Abrir o Painel Operador (aba "Fases da Automação") e rodar a rotina
+   do dia — todas as etapas de uma vez, ou retomar de onde parou se o
+   dia anterior foi interrompido.
 2. Logar manualmente no SGA quando o aplicativo solicitar (captcha
    impede login automático) — só precisa logar uma vez por sessão; o
    sistema consulta a fila inteira sozinho depois disso.
@@ -213,6 +223,16 @@ passa a rodar de verdade sem precisar de mais nenhum ajuste de código.
     corrigir ali mesmo — nesta aba a coluna continua editável.
 12. Acompanhar `Encaminhar pra Puma` — pendências que chegaram até aqui
     já passaram por toda a esteira sem sucesso. Ver seção 9.
+
+**Dica**: se você só mudou marcações do atendente (`Selecionado`,
+`Atendimento`, `Base`, `Ponto de Ação` etc.) na aba `Tratativas` sem
+que mais nada tenha mudado (nenhum incidente novo, nenhuma consulta
+nova ao SGA), não precisa rodar a rotina inteira de novo. Existe uma
+etapa avulsa no Painel Operador, **"Sincronizar seleção do
+atendente"**, que só grava essas marcações e libera o próximo disparo,
+sem reprocessar a classificação/SGA. É rápida — não reprocessa a
+esteira inteira, só o que você marcou — e não trava a tela por muito
+tempo, mesmo com volume alto de pendências.
 
 ## 7. Aba `Tratativas` — cada coluna
 
@@ -351,7 +371,10 @@ detecção automática — alimenta o Dashboard.
 - **Os campos marcados como "checkbox"/"dropdown" nas tabelas acima já
   vêm configurados como caixa de seleção/lista de verdade na planilha**
   (não são só texto "TRUE"/"FALSE" pra digitar) — clique na célula e
-  marque, ou escolha da lista, não digite o valor à mão.
+  marque, ou escolha da lista, não digite o valor à mão. Se algum
+  checkbox/dropdown sumir ou virar texto simples depois que o sistema
+  reescrever a aba, não precisa reconfigurar nada na mão — o próprio
+  sistema reaplica essa validação sozinho a cada ciclo.
 - **Nunca edite a coluna `ID (hash)`.** É assim que o sistema reconhece
   "essa é a mesma pendência de ontem" — mudar esse valor faz o sistema
   achar que é uma pendência nova.
@@ -511,3 +534,11 @@ linha) em `docs/planilha_operacional.md`, seção "Aba nova 'Alertas'".
   dia a dia~~ — **resolvido 2026-08-14**: sistema reconhece sozinho
   manutenção/instalação concluídas (remoção continua manual), ver
   seção 9.
+- ~~Construção de código do Painel Operador~~ — **CONCLUÍDA**: hoje é
+  um app instalado (.exe, pywebview) em cada PC, distribuído por um
+  Launcher com auto-atualização (Fase 1, concluída 2026-08-15, release
+  real `v1.0.0` publicada no mesmo dia). A tela "Operação" do mockup
+  virou a aba **"Fases da Automação"**, e o menu lateral ganhou mais 2
+  itens além dela: **"Dashboard"** e **"Manual"** (ver seção 4) — a
+  sidebar de 4 categorias antigas do mockup não existe mais, foi
+  simplificada pra essas 3.
