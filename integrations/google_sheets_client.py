@@ -277,6 +277,15 @@ def ler_aba(planilha: str, aba: str) -> list[dict]:
     linha vazia dentro da faixa de validação. Toda linha real das 3 abas
     sempre tem "ID (hash)" preenchido (é a chave de dedup), então esse
     filtro nunca descarta dado de verdade.
+
+    `expected_headers` (só os nomes não-vazios do cabeçalho real) evita
+    que colunas extras sem nome — achado ao vivo (2026-09-04): humano
+    colou/adicionou colunas em branco à direita de 'Instalação-Remoção',
+    virando várias colunas com cabeçalho `''` — sejam contadas como
+    "cabeçalho duplicado" pelo `gspread` (que só valida unicidade quando
+    `expected_headers` é `None`). Os valores dessas colunas em branco
+    ainda colapsam numa chave `''` no dict resultante, mas nada no
+    sistema lê essa chave.
     """
     ws = _worksheet(planilha, aba)
     if aba in ABAS_LER_POR_POSICAO:
@@ -285,7 +294,10 @@ def ler_aba(planilha: str, aba: str) -> list[dict]:
             {f"col_{i + 1}": valor for i, valor in enumerate(linha)}
             for linha in linhas
         ]
-    registros = ws.get_all_records(numericise_ignore=["all"])
+    cabecalho = ws.row_values(1)
+    registros = ws.get_all_records(
+        numericise_ignore=["all"], expected_headers=[h for h in cabecalho if h]
+    )
     if planilha == NOME_PLANILHA_OPERACIONAL:
         registros = [r for r in registros if (r.get("ID (hash)") or "").strip()]
     return registros

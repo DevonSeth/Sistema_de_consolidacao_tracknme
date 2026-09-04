@@ -76,7 +76,10 @@ class WorksheetComRegistros(WorksheetFalso):
         super().__init__()
         self._registros = registros
 
-    def get_all_records(self, numericise_ignore=None):
+    def row_values(self, row):
+        return list(self._registros[0].keys()) if self._registros else []
+
+    def get_all_records(self, numericise_ignore=None, expected_headers=None):
         return self._registros
 
 
@@ -95,6 +98,29 @@ def test_ler_aba_descarta_linha_fantasma_sem_id_hash(monkeypatch):
     linhas = sheets.ler_aba(sheets.NOME_PLANILHA_OPERACIONAL, "Tratativas")
 
     assert linhas == [{"ID (hash)": "chave-1", "Cliente": "Cliente Real", "Finalizado": "FALSE"}]
+
+
+def test_ler_aba_passa_expected_headers_sem_colunas_em_branco(monkeypatch):
+    """Achado ao vivo 2026-09-04: 'Instalação-Remoção' ganhou colunas extras
+    sem nome à direita (cabeçalho `''` repetido), o que faz o gspread real
+    recusar `get_all_records()` por "cabeçalho duplicado". `ler_aba` evita
+    isso passando só os nomes não-vazios em `expected_headers`."""
+    chamadas = []
+
+    class WorksheetComColunasEmBranco(WorksheetFalso):
+        def row_values(self, row):
+            return ["Placa", "Cliente", "", "", ""]
+
+        def get_all_records(self, numericise_ignore=None, expected_headers=None):
+            chamadas.append(expected_headers)
+            return [{"Placa": "ABC1234", "Cliente": "Alguém", "": ""}]
+
+    monkeypatch.setattr(sheets, "_worksheet", lambda planilha, aba: WorksheetComColunasEmBranco())
+
+    linhas = sheets.ler_aba(sheets.NOME_PLANILHA_ADMINISTRADOR, "Instalação-Remoção")
+
+    assert chamadas == [["Placa", "Cliente"]]
+    assert linhas == [{"Placa": "ABC1234", "Cliente": "Alguém", "": ""}]
 
 
 def test_ler_aba_nao_filtra_fora_da_planilha_operacional(monkeypatch):
