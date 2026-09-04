@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 from config import manager
-from integrations import supabase_client
+from integrations import provisionamento_client, supabase_client
 from orchestrator import pipeline
 
 
@@ -378,7 +378,15 @@ async def executar_cadeia(
     executando, devolve `motivo_parada="travado"` sem rodar nada. Gera 1
     `execucao_id` (uuid) que agrupa todas as etapas desta rodada em
     `log_execucoes` — inclusive uma eventual retomada pós-reconexão, que
-    reaproveita o mesmo id via `ExecucaoCadeia.execucao_id`."""
+    reaproveita o mesmo id via `ExecucaoCadeia.execucao_id`.
+
+    Também dispara `verificar_e_sincronizar()` antes de qualquer etapa —
+    achado 2026-09-04: credencial rotacionada no Painel Admin (Vault) só
+    chegava na máquina na PRÓXIMA abertura do app (`main.py`); se o app já
+    estava aberto, a rodada seguia com a senha antiga até alguém reiniciar
+    manualmente. Mesmo soft-fail de sempre (nunca derruba a execução por
+    falha de rede/máquina não provisionada)."""
+    provisionamento_client.verificar_e_sincronizar()
     etapas = resolver_etapas(modo, ids_selecionados)
     contexto = contexto if contexto is not None else {}
     execucao_id = str(uuid.uuid4())
